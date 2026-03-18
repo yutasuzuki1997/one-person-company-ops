@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>会社管理 - 1人会社 Ops</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#060810;--bg2:#0d1117;--bg3:#161b27;--border:#1e2a3a;--text:#e2e8f0;--text2:#94a3b8;--accent:#38bdf8;--danger:#f87171;--ok:#34d399}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;line-height:1.5}
+  header{background:var(--bg2);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;flex-wrap:wrap;gap:12px;position:sticky;top:0;z-index:50}
+  header a{color:var(--accent);text-decoration:none;font-size:13px}
+  header h1{font-size:16px;font-weight:700}
+  header select{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;min-width:200px}
+  main{max-width:900px;margin:0 auto;padding:24px 20px 80px}
+  .sec{margin-bottom:40px}
+  .sec h2{font-size:15px;color:var(--accent);margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  .hint{font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6}
+  label{display:block;font-size:11px;color:var(--text2);margin-top:10px}
+  input,textarea,select{width:100%;max-width:560px;padding:10px 12px;margin-top:4px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px}
+  textarea{min-height:72px;resize:vertical}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:8px}
+  .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600}
+  .btn-acc{background:var(--accent);color:#000}
+  .btn-gh{background:transparent;border:1px solid var(--border);color:var(--text2)}
+  .btn-dg{color:var(--danger);border:1px solid transparent;background:transparent;cursor:pointer;font-size:12px}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
+  .card-top{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+  .av{font-size:32px;width:52px;height:52px;display:flex;align-items:center;justify-content:center;background:var(--bg3);border-radius:10px}
+  .card-body{flex:1;min-width:200px}
+  .card-body strong{font-size:15px}
+  .card-body .role{font-size:12px;color:var(--text2);margin-top:4px}
+  .status{font-size:12px;margin-top:8px}
+  .status.ok{color:var(--ok)}
+  .status.err{color:var(--danger)}
+  .proj-row{display:grid;gap:8px;margin-bottom:14px;padding:14px;background:var(--bg3);border-radius:10px;border:1px solid var(--border)}
+  .proj-row h4{font-size:14px}
+  .emoji-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;max-width:400px}
+  .emoji-grid button{font-size:22px;width:40px;height:40px;border:1px solid var(--border);background:var(--bg3);border-radius:8px;cursor:pointer}
+  .emoji-grid button.on{border-color:var(--accent);background:rgba(56,189,248,0.15)}
+</style>
+</head>
+<body>
+<header>
+  <a href="/" id="backDash">← 指示ダッシュボードへ</a>
+  <h1>会社管理</h1>
+  <select id="coSel" title="会社"></select>
+</header>
+<main>
+  <p class="hint" id="coTitle" style="margin-bottom:20px"></p>
+
+  <section class="sec">
+    <h2>AI の接続方法</h2>
+    <p class="hint">クラウドの Claude（API）か、お手元のターミナル（tmux）か、会社ごとに選べます。API のときはキーを入力して保存してください。</p>
+    <label>接続モード</label>
+    <select id="prov"><option value="anthropic_api">クラウド（Anthropic API）</option><option value="tmux">お手元（tmux + Claude Code）</option></select>
+    <label>モデル</label>
+    <select id="model"></select>
+    <label>API キー（sk-ant-…）</label>
+    <input type="password" id="apikey" placeholder="未変更なら空のまま保存でよいです" autocomplete="off">
+    <div class="row"><button type="button" class="btn btn-acc" id="saveAi">設定を保存</button></div>
+    <p class="status" id="aiStatus"></p>
+  </section>
+
+  <section class="sec">
+    <h2>秘書ダッシュボードの背景</h2>
+    <p class="hint">①の指示画面の後ろに表示する画像です。会社ごとに保存されます。</p>
+    <input type="file" id="bgFile" accept="image/*" style="margin-top:8px">
+    <div class="row">
+      <button type="button" class="btn btn-acc" id="saveBg">背景を設定</button>
+      <button type="button" class="btn btn-gh" id="clearBg">背景を消す</button>
+    </div>
+    <p class="status" id="bgStatus"></p>
+  </section>
+
+  <section class="sec">
+    <h2>社員</h2>
+    <p class="hint">名前・顔アイコン（絵文字）・役割を変えられます。役割を変えたあと、下の「任せる仕事」でスキル（AI の作業手順書）を作り直せます。</p>
+    <div id="agentList"></div>
+    <div class="card" style="margin-top:20px">
+      <strong>社員を追加</strong>
+      <label>名前</label>
+      <input type="text" id="addName" placeholder="例：デザイン担当">
+      <label>役割（肩書き）</label>
+      <input type="text" id="addRole" placeholder="例：デザイン">
+      <label>顔アイコン（絵文字）</label>
+      <input type="text" id="addAv" maxlength="8" placeholder="🎨" style="max-width:120px">
+      <p style="font-size:11px;color:var(--text2);margin-top:8px">よく使う絵文字</p>
+      <div class="emoji-grid" id="addEmojiPick"></div>
+      <label>この人に任せたい仕事（AI がスキル文書を自動生成します）</label>
+      <textarea id="addJob" placeholder="例：LPのワイヤー案を出す。Figma でコンポーネントを整理する。"></textarea>
+      <div class="row"><button type="button" class="btn btn-acc" id="addAgent">社員を追加</button></div>
+      <p class="status" id="addStatus"></p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>プロジェクトとナレッジ</h2>
+    <p class="hint">プロジェクトごとに「メモや資料を置くフォルダ名」を決めます。実際の場所は <code>作業フォルダ/Knowledge/その名前/</code> です。</p>
+    <div id="projList"></div>
+    <div class="card">
+      <strong>プロジェクトを追加</strong>
+      <label>プロジェクト名</label>
+      <input type="text" id="pName">
+      <label>説明（任意）</label>
+      <textarea id="pDesc"></textarea>
+      <label>作業フォルダ（このプロジェクトで手を動かす場所・パス）</label>
+      <input type="text" id="pRepo" placeholder="例：/Users/自分/Documents/案件A">
+      <label>ナレッジ用フォルダ名（Knowledge の下にできます）</label>
+      <input type="text" id="pKnow" placeholder="例：案件A（空ならプロジェクト名と同じ）">
+      <div class="row"><button type="button" class="btn btn-acc" id="addProj">追加</button></div>
+      <p class="status" id="projAddStatus"></p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>全員に同じ指示を送る</h2>
+    <p class="hint">API モードでは全メンバーの AI に同じ文が届きます。tmux モードでは各ターミナルに一斉送信されます。</p>
+    <textarea id="bcast" placeholder="例：今日の17時までに各自の進捗を一言まとめて"></textarea>
+    <div class="row"><button type="button" class="btn btn-acc" id="sendBcast">一斉送信</button></div>
+    <p class="status" id="bcastStatus"></p>
+  </section>
+</main>
+
+<div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:100;align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;max-width:480px;width:100%;padding:20px;max-height:90vh;overflow:auto">
+    <h3 style="margin-bottom:16px">社員を編集</h3>
+    <input type="hidden" id="edId">
+    <label>名前</label>
+    <input type="text" id="edName">
+    <label>役割</label>
+    <input type="text" id="edRole">
+    <label>アイコン（絵文字）</label>
+    <input type="text" id="edAv" maxlength="8">
+    <div class="emoji-grid" id="edEmojiPick"></div>
+    <label>任せる仕事の説明（「スキルを再生成」で SKILL.md を作り直します）</label>
+    <textarea id="edJob"></textarea>
+    <div class="row" style="margin-top:16px">
+      <button type="button" class="btn btn-acc" id="edSave">保存</button>
+      <button type="button" class="btn btn-gh" id="edSkill">スキルを再生成</button>
+      <button type="button" class="btn btn-gh" id="edClose">閉じる</button>
+    </div>
+    <p class="status" id="edStatus"></p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var cid = params.get('companyId') || '';
+  var EMOJIS = ['🤖','👤','📋','🎯','🔬','👨‍💻','👩‍💼','📣','🎨','📊','💼','🛠️','✨','📝','🔧'];
+
+  function api(p) { return '/api/companies/' + encodeURIComponent(cid) + p; }
+
+  function setCid(c) {
+    cid = c;
+    document.getElementById('backDash').href = '/?companyId=' + encodeURIComponent(cid);
+    loadAll();
+  }
+
+  function loadCompanies() {
+    fetch('/api/companies').then(function (r) { return r.json(); }).then(function (list) {
+      var sel = document.getElementById('coSel');
+      sel.innerHTML = '';
+      list.forEach(function (c) {
+        var o = document.createElement('option');
+        o.value = c.id;
+        o.textContent = c.name;
+        sel.appendChild(o);
+      });
+      if (cid && list.some(function (x) { return x.id === cid; })) sel.value = cid;
+      else if (list[0]) { cid = list[0].id; sel.value = cid; }
+      sel.addEventListener('change', function () { setCid(sel.value); });
+      loadAll();
+    });
+  }
+
+  function loadAll() {
+    if (!cid) return;
+    fetch('/api/companies').then(function (r) { return r.json(); }).then(function (list) {
+      var c = list.filter(function (x) { return x.id === cid; })[0];
+      document.getElementById('coTitle').textContent = c ? '「' + c.name + '」の設定です。' : '';
+    });
+    fetch(api('/settings')).then(function (r) { return r.json(); }).then(function (s) {
+      document.getElementById('prov').value = s.providerMode || 'anthropic_api';
+      var ms = document.getElementById('model');
+      ms.innerHTML = '';
+      (s.modelOptions || []).forEach(function (m) {
+        var o = document.createElement('option');
+        o.value = m.id;
+        o.textContent = m.label;
+        if (m.id === s.model) o.selected = true;
+        ms.appendChild(o);
+      });
+      document.getElementById('apikey').value = '';
+      document.getElementById('aiStatus').textContent = s.hasApiKey ? 'APIキーは保存済みです。' : '';
+      document.getElementById('aiStatus').className = 'status ' + (s.hasApiKey ? 'ok' : '');
+    });
+    fetch(api('/agents')).then(function (r) { return r.json(); }).then(renderAgents);
+    fetch(api('/projects')).then(function (r) { return r.json(); }).then(renderProjects);
+  }
+
+  function renderAgents(agents) {
+    var el = document.getElementById('agentList');
+    el.innerHTML = '';
+    agents.forEach(function (a) {
+      var d = document.createElement('div');
+      d.className = 'card';
+      d.innerHTML =
+        '<div class="card-top"><div class="av">' + (a.avatar || '🤖') + '</div><div class="card-body">' +
+        '<strong>' + esc(a.name) + '</strong><div class="role">' + esc(a.role) + '</div></div>' +
+        '<div><button type="button" class="btn btn-gh btn-edit" data-id="' + esc(a.id) + '">編集</button> ' +
+        '<button type="button" class="btn-dg btn-del" data-id="' + esc(a.id) + '">削除</button></div></div>';
+      el.appendChild(d);
+    });
+    el.querySelectorAll('.btn-edit').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var ag = agents.filter(function (x) { return x.id === b.dataset.id; })[0];
+        if (!ag) return;
+        document.getElementById('edId').value = ag.id;
+        document.getElementById('edName').value = ag.name;
+        document.getElementById('edRole').value = ag.role;
+        document.getElementById('edAv').value = ag.avatar || '🤖';
+        document.getElementById('edJob').value = ag.personality || '';
+        document.getElementById('edStatus').textContent = '';
+        document.getElementById('editModal').style.display = 'flex';
+      });
+    });
+    el.querySelectorAll('.btn-del').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (!confirm('この社員を削除しますか？')) return;
+        fetch(api('/agents/' + encodeURIComponent(b.dataset.id)), { method: 'DELETE' }).then(function () { loadAll(); });
+      });
+    });
+  }
+
+  function renderProjects(projects) {
+    var el = document.getElementById('projList');
+    el.innerHTML = '';
+    if (!projects.length) {
+      el.innerHTML = '<p class="hint">まだありません。下から追加してください。</p>';
+      return;
+    }
+    projects.forEach(function (p) {
+      var d = document.createElement('div');
+      d.className = 'proj-row';
+      d.innerHTML =
+        '<h4>' + esc(p.name) + '</h4>' +
+        '<label>ナレッジフォルダ名（Knowledge/ の下）</label>' +
+        '<input type="text" class="pk" data-id="' + esc(p.id) + '" value="' + esc(p.knowledgePath || '') + '" placeholder="' + esc(p.name) + '">' +
+        '<label>作業フォルダ</label>' +
+        '<input type="text" class="pr" data-id="' + esc(p.id) + '" value="' + esc(p.repoPath || '') + '">' +
+        '<div class="row"><button type="button" class="btn btn-acc btn-psave" data-id="' + esc(p.id) + '">このプロジェクトを保存</button>' +
+        '<button type="button" class="btn-dg btn-pdel" data-id="' + esc(p.id) + '">削除</button></div>';
+      el.appendChild(d);
+    });
+    el.querySelectorAll('.btn-psave').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.dataset.id;
+        var row = b.closest('.proj-row');
+        fetch(api('/projects/' + encodeURIComponent(id)), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            knowledgePath: row.querySelector('.pk').value.trim(),
+            repoPath: row.querySelector('.pr').value.trim(),
+          }),
+        }).then(function () { alert('保存しました'); loadAll(); });
+      });
+    });
+    el.querySelectorAll('.btn-pdel').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (!confirm('削除しますか？')) return;
+        fetch(api('/projects/' + encodeURIComponent(b.dataset.id)), { method: 'DELETE' }).then(function () { loadAll(); });
+      });
+    });
+  }
+
+  function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  }
+
+  function fillEmojiGrid(id, inputId) {
+    var g = document.getElementById(id);
+    g.innerHTML = '';
+    EMOJIS.forEach(function (e) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = e;
+      btn.addEventListener('click', function () {
+        document.getElementById(inputId).value = e;
+        g.querySelectorAll('button').forEach(function (x) { x.classList.remove('on'); });
+        btn.classList.add('on');
+      });
+      g.appendChild(btn);
+    });
+  }
+
+  document.getElementById('saveAi').addEventListener('click', function () {
+    var body = {
+      providerMode: document.getElementById('prov').value,
+      model: document.getElementById('model').value,
+    };
+    var k = document.getElementById('apikey').value.trim();
+    if (k) body.anthropicApiKey = k;
+    fetch(api('/settings'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        document.getElementById('aiStatus').textContent = '保存しました';
+        document.getElementById('aiStatus').className = 'status ok';
+      });
+  });
+
+  document.getElementById('saveBg').addEventListener('click', function () {
+    var f = document.getElementById('bgFile').files[0];
+    if (!f) { document.getElementById('bgStatus').textContent = '画像を選んでください'; return; }
+    var r = new FileReader();
+    r.onload = function () {
+      fetch(api('/dashboard-background'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataUrl: r.result }),
+      })
+        .then(function (x) { return x.json(); })
+        .then(function (d) {
+          document.getElementById('bgStatus').textContent = d.error || '背景を設定しました。ダッシュボードで確認してください。';
+          document.getElementById('bgStatus').className = 'status ' + (d.error ? 'err' : 'ok');
+        });
+    };
+    r.readAsDataURL(f);
+  });
+  document.getElementById('clearBg').addEventListener('click', function () {
+    fetch(api('/dashboard-background'), { method: 'DELETE' }).then(function () {
+      document.getElementById('bgStatus').textContent = '背景を消しました';
+      document.getElementById('bgStatus').className = 'status ok';
+    });
+  });
+
+  document.getElementById('addAgent').addEventListener('click', function () {
+    var name = document.getElementById('addName').value.trim();
+    var role = document.getElementById('addRole').value.trim();
+    if (!name || !role) { document.getElementById('addStatus').textContent = '名前と役割は必須です'; return; }
+    var job = document.getElementById('addJob').value.trim();
+    fetch(api('/agents'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name,
+        role: role,
+        avatar: document.getElementById('addAv').value.trim() || '🤖',
+        personality: job,
+        jobInstruction: job,
+      }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) {
+          document.getElementById('addStatus').textContent = d.error;
+          return;
+        }
+        document.getElementById('addStatus').textContent =
+          d.skillWarning || '追加しました。スキルも作成済みです。';
+        document.getElementById('addStatus').className = 'status ' + (d.skillWarning ? 'err' : 'ok');
+        document.getElementById('addName').value = '';
+        document.getElementById('addRole').value = '';
+        document.getElementById('addJob').value = '';
+        loadAll();
+      });
+  });
+
+  document.getElementById('addProj').addEventListener('click', function () {
+    var name = document.getElementById('pName').value.trim();
+    if (!name) { document.getElementById('projAddStatus').textContent = '名前を入力'; return; }
+    fetch(api('/projects'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name,
+        description: document.getElementById('pDesc').value.trim(),
+        repoPath: document.getElementById('pRepo').value.trim(),
+        knowledgePath: document.getElementById('pKnow').value.trim() || name,
+      }),
+    })
+      .then(function () {
+        document.getElementById('pName').value = '';
+        document.getElementById('pDesc').value = '';
+        document.getElementById('pRepo').value = '';
+        document.getElementById('pKnow').value = '';
+        document.getElementById('projAddStatus').textContent = '追加しました';
+        loadAll();
+      });
+  });
+
+  document.getElementById('sendBcast').addEventListener('click', function () {
+    var t = document.getElementById('bcast').value.trim();
+    if (!t) return;
+    fetch(api('/broadcast-text'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: t }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        document.getElementById('bcastStatus').textContent = d.error || ('送信しました（' + (d.count || 0) + '名）');
+        document.getElementById('bcastStatus').className = 'status ' + (d.error ? 'err' : 'ok');
+      });
+  });
+
+  document.getElementById('edClose').addEventListener('click', function () {
+    document.getElementById('editModal').style.display = 'none';
+  });
+  document.getElementById('edSave').addEventListener('click', function () {
+    var id = document.getElementById('edId').value;
+    fetch(api('/agents/' + encodeURIComponent(id)), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: document.getElementById('edName').value.trim(),
+        role: document.getElementById('edRole').value.trim(),
+        avatar: document.getElementById('edAv').value.trim() || '🤖',
+        personality: document.getElementById('edJob').value.trim(),
+      }),
+    }).then(function () {
+      document.getElementById('edStatus').textContent = '保存しました';
+      loadAll();
+    });
+  });
+  document.getElementById('edSkill').addEventListener('click', function () {
+    var id = document.getElementById('edId').value;
+    var job = document.getElementById('edJob').value.trim();
+    if (!job) { document.getElementById('edStatus').textContent = '任せる仕事を入力してください'; return; }
+    document.getElementById('edStatus').textContent = '生成中…';
+    fetch(api('/agents/' + encodeURIComponent(id) + '/regenerate-skill'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobInstruction: job }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        document.getElementById('edStatus').textContent = d.error || 'スキルを更新しました';
+        document.getElementById('edStatus').className = 'status ' + (d.error ? 'err' : 'ok');
+      });
+  });
+
+  fillEmojiGrid('addEmojiPick', 'addAv');
+  fillEmojiGrid('edEmojiPick', 'edAv');
+
+  loadCompanies();
+})();
+</script>
+</body>
+</html>

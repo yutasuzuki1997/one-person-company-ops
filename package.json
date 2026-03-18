@@ -1,0 +1,48 @@
+{
+  "name": "one-person-company-ops",
+  "version": "1.1.0",
+  "description": "Multi-agent dashboard — Anthropic API or tmux + Claude Code",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "bash dashboard.sh",
+    "server": "node server.js",
+    "desktop": "electron .",
+    "pack:mac": "electron-builder --mac",
+    "pack:win": "electron-builder --win",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "multer": "^1.4.5-lts.1",
+    "node-pty": "^1.1.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.aiagents.desktop",
+    "productName": "AI Agents",
+    "directories": { "output": "dist" },
+    "files": [
+      "electron/**/*",
+      "lib/**/*",
+      "public/**/*",
+      "docs/**/*",
+      "server.js",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg", "zip"]
+    },
+    "win": {
+      "target": ["nsis"]
+    }
+  }
+}

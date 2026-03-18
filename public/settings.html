@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>設定 - AI Agents</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #060810; --bg2: #0d1117; --bg3: #161b27;
+    --border: #1e2a3a; --text: #e2e8f0; --text2: #94a3b8;
+    --accent: #38bdf8; --danger: #f87171; --success: #34d399;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    min-height: 100vh;
+  }
+
+  /* ── ヘッダー ── */
+  header {
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 0 24px; height: 54px;
+    display: flex; align-items: center; gap: 0;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .header-logo { font-size: 15px; font-weight: 700; margin-right: 28px; white-space: nowrap; }
+  .header-logo span { color: var(--accent); }
+  nav { display: flex; gap: 4px; }
+  .nav-link {
+    padding: 6px 14px; border-radius: 6px;
+    font-size: 13px; font-weight: 500; color: var(--text2);
+    text-decoration: none; transition: background 0.15s, color 0.15s;
+  }
+  .nav-link:hover { background: var(--bg3); color: var(--text); }
+  .nav-link.active { background: var(--bg3); color: var(--accent); }
+
+  /* ── メインレイアウト ── */
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 24px 60px; }
+
+  /* ── セクション ── */
+  .section { margin-bottom: 52px; }
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-title { font-size: 18px; font-weight: 700; }
+  .section-subtitle { font-size: 12px; color: var(--text2); margin-top: 2px; }
+
+  /* ── ボタン ── */
+  .btn {
+    padding: 7px 16px; border-radius: 7px; border: none;
+    cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: opacity 0.15s, transform 0.1s; white-space: nowrap;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn-accent { background: var(--accent); color: #000; }
+  .btn-accent:hover { opacity: 0.85; }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text2); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-danger-outline { background: transparent; border: 1px solid transparent; color: var(--danger); padding: 5px 10px; font-size: 12px; border-radius: 5px; cursor: pointer; }
+  .btn-danger-outline:hover { border-color: var(--danger); }
+  .btn-sm { background: transparent; border: 1px solid var(--border); color: var(--text2); padding: 5px 10px; font-size: 12px; border-radius: 5px; cursor: pointer; }
+  .btn-sm:hover { border-color: var(--text2); color: var(--text); }
+  .btn-claude { background: rgba(56,189,248,0.1); border: 1px solid rgba(56,189,248,0.3); color: var(--accent); padding: 5px 10px; font-size: 12px; border-radius: 5px; cursor: pointer; }
+  .btn-claude:hover { background: rgba(56,189,248,0.2); }
+
+  /* ── エージェントカード ── */
+  .agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .agent-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+    transition: box-shadow 0.2s;
+    --agent-color: #38bdf8;
+  }
+  .agent-card:hover { box-shadow: 0 0 16px -4px var(--agent-color); }
+
+  .agent-card-top {
+    height: 4px;
+    background: var(--agent-color);
+  }
+  .agent-card-body { padding: 14px 16px 10px; display: flex; gap: 12px; align-items: flex-start; }
+  .agent-card-avatar {
+    width: 44px; height: 44px; font-size: 24px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg3); border-radius: 10px;
+    border: 2px solid var(--border); flex-shrink: 0;
+  }
+  .agent-card-info { flex: 1; min-width: 0; }
+  .agent-card-name { font-size: 15px; font-weight: 700; }
+  .agent-card-role { font-size: 11px; color: var(--text2); margin-top: 2px; }
+  .project-badge {
+    display: inline-block; margin-top: 5px;
+    font-size: 10px; font-weight: 600;
+    padding: 2px 8px; border-radius: 4px;
+    border: 1px solid currentColor;
+  }
+  .agent-card-personality {
+    padding: 0 16px 8px;
+    font-size: 10px; color: var(--text2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .agent-card-actions {
+    padding: 8px 16px 12px;
+    border-top: 1px solid var(--border);
+    display: flex; gap: 6px; align-items: center;
+  }
+  .claude-md-result {
+    padding: 6px 16px;
+    font-size: 11px; border-radius: 0;
+    display: none;
+  }
+  .claude-md-result.success { display: block; color: var(--success); background: rgba(52,211,153,0.08); }
+  .claude-md-result.error   { display: block; color: var(--danger);  background: rgba(248,113,113,0.08); }
+
+  .api-card {
+    background: linear-gradient(145deg, rgba(30,58,95,0.35), var(--bg2));
+    border: 1px solid rgba(56,189,248,0.25);
+    border-radius: 14px;
+    padding: 22px 24px;
+    margin-bottom: 28px;
+  }
+  .api-card h3 { font-size: 16px; margin-bottom: 6px; }
+  .api-card .api-desc { font-size: 12px; color: var(--text2); margin-bottom: 18px; line-height: 1.5; }
+  .api-row { display: grid; gap: 8px; margin-bottom: 14px; max-width: 560px; }
+  .api-row label { font-size: 11px; color: var(--text2); }
+  .api-row input, .api-row select {
+    background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: 8px; font-size: 13px;
+  }
+  .api-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+  .api-status { font-size: 12px; margin-top: 12px; }
+  .api-status.ok { color: var(--success); }
+  .api-status.warn { color: #fbbf24; }
+
+  /* ── プロジェクトカード ── */
+  .projects-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+  }
+  .project-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+    transition: box-shadow 0.2s;
+    --project-color: #38bdf8;
+  }
+  .project-card:hover { box-shadow: 0 0 16px -4px var(--project-color); }
+  .project-card-top { height: 4px; background: var(--project-color); }
+  .project-card-body { padding: 14px 16px 10px; }
+  .project-card-name { font-size: 15px; font-weight: 700; }
+  .project-card-desc { font-size: 12px; color: var(--text2); margin-top: 4px; line-height: 1.5; }
+  .project-card-path {
+    margin-top: 10px; padding: 6px 10px;
+    background: var(--bg3); border-radius: 6px;
+    font-size: 11px; font-family: monospace; color: var(--text2);
+    word-break: break-all;
+  }
+  .project-card-path span { color: var(--text2); opacity: 0.6; font-size: 10px; }
+  .project-card-actions {
+    padding: 8px 16px 12px;
+    border-top: 1px solid var(--border);
+    display: flex; gap: 6px;
+  }
+
+  /* ── モーダル ── */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.78); z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px;
+    width: 480px; max-width: 95vw; max-height: 92vh; overflow-y: auto;
+  }
+  .modal::-webkit-scrollbar { width: 4px; }
+  .modal::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .modal h2 { font-size: 16px; margin-bottom: 20px; }
+
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 11px; color: var(--text2); margin-bottom: 5px; }
+  .form-group input[type="text"],
+  .form-group select,
+  .form-group textarea {
+    width: 100%; background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: 7px;
+    font-size: 13px; outline: none; font-family: inherit;
+  }
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--accent); }
+  .form-group textarea { resize: vertical; min-height: 72px; line-height: 1.5; }
+  .form-group select option { background: var(--bg2); }
+
+  /* セクション区切り */
+  .modal-section { margin: 18px 0 14px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .modal-section-label {
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    letter-spacing: 0.08em; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .modal-section-label::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, var(--accent), transparent); opacity: 0.3;
+  }
+
+  /* アバター・カラー */
+  .avatar-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+  .avatar-option {
+    width: 34px; height: 34px; border-radius: 7px;
+    border: 2px solid var(--border); background: var(--bg3);
+    font-size: 17px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: border-color 0.15s;
+  }
+  .avatar-option.selected { border-color: var(--accent); }
+  .avatar-option:hover { border-color: var(--text2); }
+
+  .color-grid { display: flex; flex-wrap: wrap; gap: 7px; }
+  .color-swatch {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid transparent; cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s;
+  }
+  .color-swatch:hover { transform: scale(1.15); }
+  .color-swatch.selected { border-color: #fff; transform: scale(1.2); }
+
+  /* 画像ピッカー */
+  .img-picker { display: flex; align-items: center; gap: 8px; }
+  .btn-pick {
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text2); padding: 5px 10px; border-radius: 5px;
+    font-size: 12px; cursor: pointer; flex-shrink: 0;
+  }
+  .btn-pick:hover { border-color: var(--text2); }
+  .img-picker-name { font-size: 11px; color: var(--text2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn-clear-img { background: transparent; border: none; color: var(--danger); font-size: 12px; cursor: pointer; padding: 2px 4px; }
+  .img-preview { margin-top: 6px; width: 100%; height: 60px; object-fit: cover; border-radius: 5px; border: 1px solid var(--border); display: none; }
+  .img-preview.visible { display: block; }
+
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+  /* 空状態 */
+  .empty-state {
+    padding: 40px; text-align: center;
+    color: var(--text2); font-size: 14px;
+    background: var(--bg2); border: 1px dashed var(--border);
+    border-radius: 12px;
+  }
+  .empty-state .empty-icon { font-size: 36px; margin-bottom: 12px; }
+
+  /* トースト */
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--bg2); border: 1px solid var(--border);
+    padding: 10px 20px; border-radius: 8px; font-size: 13px;
+    z-index: 300; opacity: 0; transition: opacity 0.2s;
+    pointer-events: none; white-space: nowrap;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-logo">⚡ AI <span>Agents</span></div>
+  <nav>
+    <a href="/" class="nav-link">ダッシュボード</a>
+    <a href="/settings#agents" class="nav-link active" id="navAgents">社員管理</a>
+    <a href="/projects-page" class="nav-link" id="navProjects">プロジェクト管理</a>
+  </nav>
+</header>
+
+<main>
+  <div class="api-card" id="apiCard">
+    <h3>🔑 API・接続モード</h3>
+    <p class="api-desc">
+      <strong>Anthropic API</strong> を選ぶと、ご自身の API キーでクラウド上の Claude が応答します（デスクトップアプリ向け）。<br>
+      <strong>tmux + Claude Code</strong> は従来どおりターミナル上の Claude Code と連携します。
+    </p>
+    <div class="api-row">
+      <label>接続モード</label>
+      <select id="providerMode">
+        <option value="anthropic_api">Anthropic API（推奨・APIキー必須）</option>
+        <option value="tmux">tmux + Claude Code（ローカルCLI）</option>
+      </select>
+    </div>
+    <div class="api-row">
+      <label>モデル</label>
+      <select id="modelSelect"></select>
+    </div>
+    <div class="api-row">
+      <label>Anthropic API キー（sk-ant-...）<span id="keyHint" style="color:var(--text2)"></span></label>
+      <input type="password" id="apiKeyInput" placeholder="新しいキーを貼り付けて保存" autocomplete="off">
+    </div>
+    <div class="api-actions">
+      <button class="btn btn-accent" type="button" id="saveApiBtn">設定を保存</button>
+      <button class="btn btn-ghost" type="button" id="clearApiBtn">APIキーを削除</button>
+    </div>
+    <div class="api-status" id="apiStatus"></div>
+  </div>
+
+  <!-- 社員管理 -->
+  <section class="section" id="agents">
+    <div class="section-header">
+      <div>
+        <div class="section-title">👥 社員管理</div>
+        <div class="section-subtitle">エージェントの追加・編集・削除・CLAUDE.md生成</div>
+      </div>
+      <button class="btn btn-accent" id="addAgentBtn">＋ 社員を追加</button>
+    </div>
+    <div class="agents-grid" id="agentsGrid"></div>
+  </section>
+
+  <!-- プロジェクト管理 -->
+  <section class="section" id="projects">
+    <div class="section-header">
+      <div>
+        <div class="section-title">📁 プロジェクト管理</div>
+        <div class="section-subtitle">リポジトリ・ナレッジパスの管理</div>
+      </div>
+      <button class="btn btn-accent" id="addProjectBtn">＋ プロジェクトを追加</button>
+    </div>
+    <div class="projects-grid" id="projectsGrid"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<!-- エージェントモーダル -->
+<div class="modal-overlay" id="agentModal">
+  <div class="modal">
+    <h2 id="agentModalTitle">社員を追加</h2>
+    <div class="form-group"><label>名前 *</label><input type="text" id="fName" placeholder="例: 田中太郎"></div>
+    <div class="form-group"><label>役職 *</label><input type="text" id="fRole" placeholder="例: エンジニア"></div>
+    <div class="form-group">
+      <label>担当プロジェクト</label>
+      <select id="fProjectId"><option value="">未設定</option></select>
+    </div>
+    <div class="form-group"><label>アバター</label><div class="avatar-grid" id="avatarGrid"></div></div>
+    <div class="form-group"><label>カラー</label><div class="color-grid" id="agentColorGrid"></div></div>
+
+    <div class="modal-section">
+      <div class="modal-section-label">🖼 外観</div>
+      <div class="form-group">
+        <label>パネル背景画像（任意）</label>
+        <div class="img-picker">
+          <button type="button" class="btn-pick" id="fPanelBgBtn">📷 選択</button>
+          <span class="img-picker-name" id="fPanelBgName">未設定</span>
+          <button type="button" class="btn-clear-img" id="fPanelBgClear" style="display:none">✕</button>
+        </div>
+        <img id="fPanelBgPreview" class="img-preview" alt="">
+        <input type="file" id="fPanelBgInput" accept="image/*" style="display:none">
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <div class="modal-section-label">✨ 人格・口調</div>
+      <div class="form-group">
+        <label>キャラクター設定（任意）</label>
+        <textarea id="fPersonality" placeholder="例: ピカチュウのように語尾に「ピカ！」をつけて元気よく話す。"></textarea>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="agentModalCancel">キャンセル</button>
+      <button class="btn btn-accent" id="agentModalSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- プロジェクトモーダル -->
+<div class="modal-overlay" id="projectModal">
+  <div class="modal">
+    <h2 id="projectModalTitle">プロジェクトを追加</h2>
+    <div class="form-group"><label>プロジェクト名 *</label><input type="text" id="pName" placeholder="例: ECサイト刷新"></div>
+    <div class="form-group"><label>説明</label><textarea id="pDesc" placeholder="例: Nextjs + Supabase で構築するECサイト"></textarea></div>
+    <div class="form-group"><label>作業ディレクトリ (repoPath)</label><input type="text" id="pRepoPath" placeholder="例: /Users/you/projects/ec-site"></div>
+    <div class="form-group"><label>ナレッジパス (knowledgePath)</label><input type="text" id="pKnowledgePath" placeholder="例: /Users/you/projects/ec-site/docs"></div>
+    <div class="form-group"><label>カラー</label><div class="color-grid" id="projectColorGrid"></div></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="projectModalCancel">キャンセル</button>
+      <button class="btn btn-accent" id="projectModalSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var AVATARS = [
+    '👨‍💻','👩‍💼','⚖️','📊','❄️','🎯','🚀','🧠',
+    '🎨','🔬','💡','🛡️','📡','🌐','🤖','👾','🦾','🧩','📱','💻'
+  ];
+  var COLORS = [
+    '#38bdf8','#f472b6','#a78bfa','#34d399',
+    '#fbbf24','#fb923c','#ef4444','#22c55e',
+    '#e879f9','#818cf8','#06b6d4','#f59e0b'
+  ];
+
+  var agents = [];
+  var projects = [];
+  var editingAgentId = null;
+  var editingProjectId = null;
+  var selectedAvatar = AVATARS[0];
+  var selectedAgentColor = COLORS[0];
+  var selectedProjectColor = COLORS[0];
+  var selectedPanelBg = null;
+  var companyId = new URLSearchParams(location.search).get('companyId');
+  function api(p) {
+    return '/api/companies/' + encodeURIComponent(companyId) + p;
+  }
+
+  // ── ナビゲーション ──
+  function updateNav() {
+    var hash = location.hash;
+    document.getElementById('navAgents').classList.toggle('active', !hash || hash === '#agents');
+    document.getElementById('navProjects').classList.toggle('active', hash === '#projects');
+  }
+  window.addEventListener('hashchange', updateNav);
+  updateNav();
+
+  // ── トースト ──
+  function toast(msg, isError) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.borderColor = isError ? 'var(--danger)' : 'var(--success)';
+    el.style.color = isError ? 'var(--danger)' : 'var(--success)';
+    el.classList.add('show');
+    setTimeout(function () { el.classList.remove('show'); }, 3000);
+  }
+
+  // ── データ取得 ──
+  function fetchAll() {
+    return Promise.all([
+      fetch(api('/agents')).then(function (r) {
+        return r.json();
+      }),
+      fetch(api('/projects')).then(function (r) {
+        return r.json();
+      }),
+    ]).then(function (results) {
+      agents = results[0];
+      projects = results[1];
+      renderAgents();
+      renderProjects();
+    });
+  }
+  function boot(done) {
+    if (!companyId) {
+      fetch('/api/companies')
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (L) {
+          if (!L.length) {
+            toast('ダッシュボードで「会社を追加」してください', true);
+            return;
+          }
+          companyId = L[0].id;
+          history.replaceState(null, '', '?companyId=' + companyId);
+          fetchAll().then(function () {
+            if (done) done();
+          });
+        });
+      return;
+    }
+    fetchAll().then(function () {
+      if (done) done();
+    });
+  }
+
+  // ── プロジェクト検索 ──
+  function getProject(id) {
+    return projects.find(function(p) { return p.id === id; }) || null;
+  }
+
+  // ── エージェント描画 ──
+  function renderAgents() {
+    var grid = document.getElementById('agentsGrid');
+    if (agents.length === 0) {
+      grid.innerHTML = '<div class="empty-state"><div class="empty-icon">👥</div>社員がいません。「＋ 社員を追加」から追加してください。</div>';
+      return;
+    }
+    grid.innerHTML = '';
+    agents.forEach(function(agent) {
+      var proj = agent.projectId ? getProject(agent.projectId) : null;
+      var card = document.createElement('div');
+      card.className = 'agent-card';
+      card.style.setProperty('--agent-color', agent.color);
+      card.dataset.agentId = agent.id;
+
+      var badgeHtml = '';
+      if (proj) {
+        badgeHtml = '<span class="project-badge" style="color:' + proj.color + '; border-color:' + proj.color + '; background: ' + hexToRgba(proj.color, 0.1) + '">' + escHtml(proj.name) + '</span>';
+      }
+      var personalityText = agent.personality ? escHtml(agent.personality.slice(0, 60)) + (agent.personality.length > 60 ? '…' : '') : '';
+
+      card.innerHTML =
+        '<div class="agent-card-top"></div>' +
+        '<div class="agent-card-body">' +
+          '<div class="agent-card-avatar">' + agent.avatar + '</div>' +
+          '<div class="agent-card-info">' +
+            '<div class="agent-card-name">' + escHtml(agent.name) + '</div>' +
+            '<div class="agent-card-role">' + escHtml(agent.role) + '</div>' +
+            badgeHtml +
+          '</div>' +
+        '</div>' +
+        (personalityText ? '<div class="agent-card-personality">💬 ' + personalityText + '</div>' : '') +
+        '<div class="claude-md-result" id="claudeResult-' + agent.id + '"></div>' +
+        '<div class="agent-card-actions">' +
+          '<button class="btn-sm" data-edit>編集</button>' +
+          '<button class="btn-claude" data-claude>CLAUDE.md 生成</button>' +
+          '<span style="flex:1"></span>' +
+          '<button class="btn-danger-outline" data-del>削除</button>' +
+        '</div>';
+
+      (function(id, name) {
+        card.querySelector('[data-edit]').addEventListener('click', function() { openEditAgentModal(id); });
+        card.querySelector('[data-del]').addEventListener('click', function() { deleteAgent(id, name); });
+        card.querySelector('[data-claude]').addEventListener('click', function() { generateClaudeMd(id); });
+      })(agent.id, agent.name);
+
+      grid.appendChild(card);
+    });
+  }
+
+  // ── プロジェクト描画 ──
+  function renderProjects() {
+    var grid = document.getElementById('projectsGrid');
+    if (projects.length === 0) {
+      grid.innerHTML = '<div class="empty-state"><div class="empty-icon">📁</div>プロジェクトがありません。「＋ プロジェクトを追加」から追加してください。</div>';
+      return;
+    }
+    grid.innerHTML = '';
+    projects.forEach(function(proj) {
+      var card = document.createElement('div');
+      card.className = 'project-card';
+      card.style.setProperty('--project-color', proj.color);
+
+      card.innerHTML =
+        '<div class="project-card-top"></div>' +
+        '<div class="project-card-body">' +
+          '<div class="project-card-name">' + escHtml(proj.name) + '</div>' +
+          (proj.description ? '<div class="project-card-desc">' + escHtml(proj.description) + '</div>' : '') +
+          (proj.repoPath ? '<div class="project-card-path"><span>📂 作業</span> ' + escHtml(proj.repoPath) + '</div>' : '') +
+          (proj.knowledgePath ? '<div class="project-card-path"><span>📚 ナレッジ</span> ' + escHtml(proj.knowledgePath) + '</div>' : '') +
+        '</div>' +
+        '<div class="project-card-actions">' +
+          '<button class="btn-sm" data-edit>編集</button>' +
+          '<span style="flex:1"></span>' +
+          '<button class="btn-danger-outline" data-del>削除</button>' +
+        '</div>';
+
+      (function(id, name) {
+        card.querySelector('[data-edit]').addEventListener('click', function() { openEditProjectModal(id); });
+        card.querySelector('[data-del]').addEventListener('click', function() { deleteProject(id, name); });
+      })(proj.id, proj.name);
+
+      grid.appendChild(card);
+    });
+  }
+
+  // ── CLAUDE.md 生成 ──
+  function generateClaudeMd(id) {
+    var resultEl = document.getElementById('claudeResult-' + id);
+    resultEl.className = 'claude-md-result';
+    resultEl.textContent = '生成中...';
+    resultEl.style.display = 'block';
+    resultEl.style.color = 'var(--text2)';
+    resultEl.style.background = 'none';
+
+    fetch(api('/agents/' + id + '/generate-claude-md'), { method: 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.success) {
+          resultEl.className = 'claude-md-result success';
+          resultEl.textContent = '✓ 生成完了: ' + data.path;
+          toast('CLAUDE.md を生成しました');
+        } else {
+          resultEl.className = 'claude-md-result error';
+          resultEl.textContent = '✕ ' + (data.error || 'エラー');
+          toast(data.error || 'エラーが発生しました', true);
+        }
+      })
+      .catch(function(e) {
+        resultEl.className = 'claude-md-result error';
+        resultEl.textContent = '✕ 通信エラー';
+        toast('通信エラー', true);
+      });
+  }
+
+  // ── エージェントCRUD ──
+  function deleteAgent(id, name) {
+    if (!confirm('「' + name + '」を削除しますか?\ntmuxペインも閉じられます。')) return;
+    fetch(api('/agents/' + id), { method: 'DELETE' })
+      .then(function() { return fetchAll(); })
+      .then(function() { toast(name + ' を削除しました'); });
+  }
+
+  // ── プロジェクトCRUD ──
+  function deleteProject(id, name) {
+    if (!confirm('「' + name + '」を削除しますか?')) return;
+    fetch(api('/projects/' + id), { method: 'DELETE' })
+      .then(function() { return fetchAll(); })
+      .then(function() { toast(name + ' を削除しました'); });
+  }
+
+  // ── エージェントモーダル ──
+  function initAgentModal() {
+    var avatarGrid = document.getElementById('avatarGrid');
+    AVATARS.forEach(function(em) {
+      var el = document.createElement('div');
+      el.className = 'avatar-option';
+      el.textContent = em;
+      el.addEventListener('click', function() {
+        selectedAvatar = em;
+        avatarGrid.querySelectorAll('.avatar-option').forEach(function(x) { x.classList.remove('selected'); });
+        el.classList.add('selected');
+      });
+      avatarGrid.appendChild(el);
+    });
+
+    var colorGrid = document.getElementById('agentColorGrid');
+    COLORS.forEach(function(c) {
+      var el = document.createElement('div');
+      el.className = 'color-swatch';
+      el.style.background = c;
+      el.title = c;
+      el.addEventListener('click', function() {
+        selectedAgentColor = c;
+        colorGrid.querySelectorAll('.color-swatch').forEach(function(x) { x.classList.remove('selected'); });
+        el.classList.add('selected');
+      });
+      colorGrid.appendChild(el);
+    });
+
+    var panelBgInput = document.getElementById('fPanelBgInput');
+    var panelBgPreview = document.getElementById('fPanelBgPreview');
+    document.getElementById('fPanelBgBtn').addEventListener('click', function() { panelBgInput.click(); });
+    panelBgInput.addEventListener('change', function() {
+      var file = panelBgInput.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        selectedPanelBg = ev.target.result;
+        document.getElementById('fPanelBgName').textContent = file.name;
+        document.getElementById('fPanelBgClear').style.display = 'inline';
+        panelBgPreview.src = selectedPanelBg;
+        panelBgPreview.classList.add('visible');
+      };
+      reader.readAsDataURL(file);
+      panelBgInput.value = '';
+    });
+    document.getElementById('fPanelBgClear').addEventListener('click', function() {
+      selectedPanelBg = null;
+      document.getElementById('fPanelBgName').textContent = '未設定';
+      document.getElementById('fPanelBgClear').style.display = 'none';
+      panelBgPreview.src = '';
+      panelBgPreview.classList.remove('visible');
+    });
+
+    function refreshApiUi(s) {
+      document.getElementById('providerMode').value = s.providerMode || 'anthropic_api';
+      var ms = document.getElementById('modelSelect');
+      ms.innerHTML = '';
+      (s.modelOptions || []).forEach(function (m) {
+        var o = document.createElement('option');
+        o.value = m.id;
+        o.textContent = m.label;
+        if (m.id === s.model) o.selected = true;
+        ms.appendChild(o);
+      });
+      if (!ms.value && s.model) {
+        var o2 = document.createElement('option');
+        o2.value = s.model;
+        o2.textContent = s.model;
+        o2.selected = true;
+        ms.appendChild(o2);
+      }
+      document.getElementById('apiKeyInput').value = '';
+      document.getElementById('keyHint').textContent = s.hasApiKey
+        ? ' — 保存済み。新しいキーで上書きできます'
+        : ' — 未登録';
+      var st = document.getElementById('apiStatus');
+      if (s.providerMode === 'anthropic_api') {
+        st.className = 'api-status ' + (s.hasApiKey ? 'ok' : 'warn');
+        st.textContent = s.hasApiKey
+          ? 'APIキーは端末外に送信されず、このアプリ内にのみ保存されます。'
+          : 'Anthropic コンソールで API キーを発行し、ここに貼り付けて保存してください。';
+      } else {
+        st.className = 'api-status';
+        st.textContent = 'tmux モード: ./start-agents.sh で one-person-company-ops セッションを起動してください。';
+      }
+    }
+    fetch(api('/settings'))
+      .then(function (r) {
+        return r.json();
+      })
+      .then(refreshApiUi)
+      .catch(function () {});
+    document.getElementById('saveApiBtn').addEventListener('click', function () {
+      var body = {
+        providerMode: document.getElementById('providerMode').value,
+        model: document.getElementById('modelSelect').value,
+      };
+      var k = document.getElementById('apiKeyInput').value.trim();
+      if (k) body.anthropicApiKey = k;
+      fetch(api('/settings'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (s) {
+          refreshApiUi(s);
+          toast('設定を保存しました');
+          document.getElementById('apiKeyInput').value = '';
+        })
+        .catch(function () {
+          toast('保存に失敗しました', true);
+        });
+    });
+    document.getElementById('clearApiBtn').addEventListener('click', function () {
+      if (!confirm('保存している API キーを削除しますか？')) return;
+      fetch(api('/settings'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearApiKey: true }),
+      })
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (s) {
+          refreshApiUi(s);
+          toast('APIキーを削除しました');
+        });
+    });
+
+    document.getElementById('addAgentBtn').addEventListener('click', openAddAgentModal);
+    document.getElementById('agentModalCancel').addEventListener('click', closeAgentModal);
+    document.getElementById('agentModalSave').addEventListener('click', saveAgentModal);
+    document.getElementById('agentModal').addEventListener('click', function(e) {
+      if (e.target === e.currentTarget) closeAgentModal();
+    });
+  }
+
+  function populateProjectDropdown(selectedId) {
+    var sel = document.getElementById('fProjectId');
+    sel.innerHTML = '<option value="">未設定</option>';
+    projects.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      if (p.id === selectedId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function setAgentAvatar(em) {
+    selectedAvatar = em;
+    document.querySelectorAll('#avatarGrid .avatar-option').forEach(function(el) {
+      el.classList.toggle('selected', el.textContent === em);
+    });
+  }
+  function setAgentColor(c) {
+    selectedAgentColor = c;
+    document.querySelectorAll('#agentColorGrid .color-swatch').forEach(function(el) {
+      el.classList.toggle('selected', el.title === c);
+    });
+  }
+  function setAgentPanelBg(base64) {
+    var preview = document.getElementById('fPanelBgPreview');
+    selectedPanelBg = base64 || null;
+    if (base64) {
+      document.getElementById('fPanelBgName').textContent = '設定済み';
+      document.getElementById('fPanelBgClear').style.display = 'inline';
+      preview.src = base64;
+      preview.classList.add('visible');
+    } else {
+      document.getElementById('fPanelBgName').textContent = '未設定';
+      document.getElementById('fPanelBgClear').style.display = 'none';
+      preview.src = '';
+      preview.classList.remove('visible');
+    }
+  }
+
+  function openAddAgentModal() {
+    editingAgentId = null;
+    document.getElementById('agentModalTitle').textContent = '社員を追加';
+    document.getElementById('fName').value = '';
+    document.getElementById('fRole').value = '';
+    document.getElementById('fPersonality').value = '';
+    populateProjectDropdown('');
+    setAgentAvatar(AVATARS[0]);
+    setAgentColor(COLORS[0]);
+    setAgentPanelBg(null);
+    document.getElementById('agentModal').classList.add('open');
+    document.getElementById('fName').focus();
+  }
+
+  function openEditAgentModal(id) {
+    var agent = agents.find(function(a) { return a.id === id; });
+    if (!agent) return;
+    editingAgentId = id;
+    document.getElementById('agentModalTitle').textContent = '社員を編集';
+    document.getElementById('fName').value = agent.name;
+    document.getElementById('fRole').value = agent.role;
+    document.getElementById('fPersonality').value = agent.personality || '';
+    populateProjectDropdown(agent.projectId || '');
+    setAgentAvatar(agent.avatar);
+    setAgentColor(agent.color);
+    // panelBg を取得（base64はHTTP経由）
+    if (agent.hasPanelBg) {
+      fetch(api('/agents/' + id + '/panelbg'))
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (d) {
+        setAgentPanelBg(d.panelBg || null);
+      });
+    } else {
+      setAgentPanelBg(null);
+    }
+    document.getElementById('agentModal').classList.add('open');
+    document.getElementById('fName').focus();
+  }
+
+  function closeAgentModal() { document.getElementById('agentModal').classList.remove('open'); }
+
+  function saveAgentModal() {
+    var name = document.getElementById('fName').value.trim();
+    var role = document.getElementById('fRole').value.trim();
+    if (!name || !role) { alert('名前と役職は必須です'); return; }
+    var body = JSON.stringify({
+      name: name, role: role,
+      personality: document.getElementById('fPersonality').value.trim(),
+      projectId: document.getElementById('fProjectId').value,
+      avatar: selectedAvatar, color: selectedAgentColor,
+      aiType: 'claude-code',
+      panelBg: selectedPanelBg || ''
+    });
+    var headers = { 'Content-Type': 'application/json' };
+    var req = editingAgentId
+      ? fetch(api('/agents/' + editingAgentId), { method: 'PUT', headers: headers, body: body })
+      : fetch(api('/agents'), { method: 'POST', headers: headers, body: body });
+    req
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        if (data.skillWarning) alert(data.skillWarning);
+        closeAgentModal();
+        return fetchAll();
+      })
+      .then(function () {
+        toast(editingAgentId ? '保存しました' : '社員を追加しました');
+      });
+  }
+
+  // ── プロジェクトモーダル ──
+  function initProjectModal() {
+    var colorGrid = document.getElementById('projectColorGrid');
+    COLORS.forEach(function(c) {
+      var el = document.createElement('div');
+      el.className = 'color-swatch';
+      el.style.background = c;
+      el.title = c;
+      el.addEventListener('click', function() {
+        selectedProjectColor = c;
+        colorGrid.querySelectorAll('.color-swatch').forEach(function(x) { x.classList.remove('selected'); });
+        el.classList.add('selected');
+      });
+      colorGrid.appendChild(el);
+    });
+
+    document.getElementById('addProjectBtn').addEventListener('click', openAddProjectModal);
+    document.getElementById('projectModalCancel').addEventListener('click', closeProjectModal);
+    document.getElementById('projectModalSave').addEventListener('click', saveProjectModal);
+    document.getElementById('projectModal').addEventListener('click', function(e) {
+      if (e.target === e.currentTarget) closeProjectModal();
+    });
+  }
+
+  function setProjectColor(c) {
+    selectedProjectColor = c;
+    document.querySelectorAll('#projectColorGrid .color-swatch').forEach(function(el) {
+      el.classList.toggle('selected', el.title === c);
+    });
+  }
+
+  function openAddProjectModal() {
+    editingProjectId = null;
+    document.getElementById('projectModalTitle').textContent = 'プロジェクトを追加';
+    document.getElementById('pName').value = '';
+    document.getElementById('pDesc').value = '';
+    document.getElementById('pRepoPath').value = '';
+    document.getElementById('pKnowledgePath').value = '';
+    setProjectColor(COLORS[0]);
+    document.getElementById('projectModal').classList.add('open');
+    document.getElementById('pName').focus();
+  }
+
+  function openEditProjectModal(id) {
+    var proj = projects.find(function(p) { return p.id === id; });
+    if (!proj) return;
+    editingProjectId = id;
+    document.getElementById('projectModalTitle').textContent = 'プロジェクトを編集';
+    document.getElementById('pName').value = proj.name;
+    document.getElementById('pDesc').value = proj.description || '';
+    document.getElementById('pRepoPath').value = proj.repoPath || '';
+    document.getElementById('pKnowledgePath').value = proj.knowledgePath || '';
+    setProjectColor(proj.color || COLORS[0]);
+    document.getElementById('projectModal').classList.add('open');
+    document.getElementById('pName').focus();
+  }
+
+  function closeProjectModal() { document.getElementById('projectModal').classList.remove('open'); }
+
+  function saveProjectModal() {
+    var name = document.getElementById('pName').value.trim();
+    if (!name) { alert('プロジェクト名は必須です'); return; }
+    var body = JSON.stringify({
+      name: name,
+      description: document.getElementById('pDesc').value.trim(),
+      repoPath: document.getElementById('pRepoPath').value.trim(),
+      knowledgePath: document.getElementById('pKnowledgePath').value.trim(),
+      color: selectedProjectColor,
+    });
+    var headers = { 'Content-Type': 'application/json' };
+    var req = editingProjectId
+      ? fetch(api('/projects/' + editingProjectId), { method: 'PUT', headers: headers, body: body })
+      : fetch(api('/projects'), { method: 'POST', headers: headers, body: body });
+    req.then(function() {
+      closeProjectModal();
+      return fetchAll();
+    }).then(function() {
+      toast(editingProjectId ? 'プロジェクトを更新しました' : 'プロジェクトを追加しました');
+    });
+  }
+
+  // ── ユーティリティ ──
+  function escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function hexToRgba(hex, alpha) {
+    var r = parseInt(hex.slice(1, 3), 16);
+    var g = parseInt(hex.slice(3, 5), 16);
+    var b = parseInt(hex.slice(5, 7), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  }
+
+  // ── Escキー ──
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') { closeAgentModal(); closeProjectModal(); }
+  });
+
+  // ── 初期化 ──
+  function init() {
+    initAgentModal();
+    initProjectModal();
+    boot(function () {
+      var params = new URLSearchParams(location.search);
+      var editId = params.get('edit');
+      if (editId) {
+        document.getElementById('agents').scrollIntoView({ behavior: 'smooth' });
+        openEditAgentModal(editId);
+      }
+    });
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
