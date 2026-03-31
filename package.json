@@ -6,7 +6,13 @@
   "scripts": {
     "start": "bash dashboard.sh",
     "server": "node server.js",
-    "desktop": "electron .",
+    "dev": "vite --config vite.config.js",
+    "build": "vite build --config vite.config.js",
+    "desktop": "npm run build && electron .",
+    "desktop:dev": "concurrently \"npm run dev\" \"NODE_ENV=development electron .\"",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
     "pack:mac": "electron-builder --mac",
     "pack:win": "electron-builder --win",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -16,33 +22,45 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@octokit/rest": "^21.1.1",
+    "electron-updater": "^6.3.9",
     "express": "^5.2.1",
     "multer": "^1.4.5-lts.1",
     "node-pty": "^1.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
     "electron": "^33.2.1",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "vite": "^6.2.4"
   },
   "build": {
-    "appId": "com.aiagents.desktop",
-    "productName": "AI Agents",
-    "directories": { "output": "dist" },
+    "appId": "com.onecompanyops.app",
+    "productName": "OneCompanyOps",
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
     "files": [
+      "public_new/**/*",
       "electron/**/*",
       "lib/**/*",
-      "public/**/*",
-      "docs/**/*",
+      "core/**/*",
       "server.js",
       "package.json"
     ],
-    "mac": {
-      "category": "public.app-category.productivity",
-      "target": ["dmg", "zip"]
-    },
-    "win": {
-      "target": ["nsis"]
-    }
+    "extraResources": [
+      {
+        "from": "core/",
+        "to": "core/"
+      }
+    ],
+    "asar": true
   }
 }

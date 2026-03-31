@@ -13,7 +13,9 @@ const { snapshotFromRepo } = require('./lib/company-snapshot');
 const { CompanyRegistry } = require('./lib/company-registry');
 const { scaffoldCompanyWorkspace } = require('./lib/workspace-scaffold');
 const { startAutoGitSync, syncWorkspace } = require('./lib/git-autosync');
-const { completeAnthropic } = require('./lib/anthropic-stream');
+const { completeAnthropic, streamAnthropic } = require('./lib/anthropic-stream');
+const { listRepositories, getFileContent, updateFileContent, listFileTree, createPullRequest, mergePullRequest, listPullRequests, getPullRequest } = require('./lib/github-connector');
+const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
 
 const knowledgeUpload = multer({
   storage: multer.memoryStorage(),
@@ -304,6 +306,9 @@ function walkTree(absRoot, relBase, depth, maxD) {
 }
 
 app.use(express.json({ limit: '20mb' }));
+// public_new/ = Vite ビルド成果物（React アプリ）を優先配信
+app.use(express.static(path.join(__dirname, 'public_new')));
+// public/ = 旧来の静的HTMLページをフォールバックとして配信
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(
   '/guides',
@@ -378,8 +383,8 @@ app.get('/api/companies/:companyId/agents', withCompany, (req, res) => {
 app.post('/api/companies/:companyId/agents', withCompany, async (req, res) => {
   try {
     const agents = reg.loadAgents(req.cid);
-    const { name, role, project, avatar, color, aiType, personality, panelBg, projectId, jobInstruction } =
-      req.body || {};
+    const { name, role, project, avatar, color, aiType, personality, panelBg, projectId, jobInstruction,
+            skills, repositories, jobDescription } = req.body || {};
     if (!name || !role) return res.status(400).json({ error: 'name と role は必須です' });
     const id = 'agent-' + Date.now();
     const agent = {
@@ -394,6 +399,17 @@ app.post('/api/companies/:companyId/agents', withCompany, async (req, res) => {
       personality: personality || '',
       panelBg: panelBg || '',
       projectId: projectId || '',
+      skills: Array.isArray(skills) ? skills : [],
+      repositories: Array.isArray(repositories) ? repositories : [],
+      status: 'idle',
+      progress: 0,
+      estimatedMinutes: null,
+      currentTask: '',
+      lastMessage: '',
+      lastActiveAt: null,
+      jobDescription: jobDescription || '',
+      pendingJdUpdate: null,
+      createdAt: new Date().toISOString(),
     };
     agents.push(agent);
     reg.saveAgents(req.cid, agents);
@@ -849,26 +865,659 @@ app.get('/api/companies/:companyId/knowledge', withCompany, (req, res) => {
   });
 });
 
-/* 後方互換（単一クエリ） */
+/* グローバル設定 API（SetupWizard / 汎用） */
 app.get('/api/settings', (req, res) => {
-  const cid = req.query.companyId || reg.primaryCompanyId();
-  res.json({ ...publicSettings(reg.loadSettings(cid)), modelOptions: MODEL_OPTIONS });
-});
-app.post('/api/settings', (req, res) => {
-  const cid = req.body.companyId || reg.primaryCompanyId();
-  if (!reg.getCompany(cid)) return res.status(404).json({ error: '会社不明' });
-  const cur = reg.loadSettings(cid);
-  const { providerMode, anthropicApiKey, model, clearApiKey } = req.body || {};
-  if (providerMode === 'tmux' || providerMode === 'anthropic_api') {
-    cur.providerMode = providerMode;
+  // companyId 指定時は会社ごとの設定を返す（後方互換）
+  if (req.query.companyId) {
+    const cid = req.query.companyId;
+    return res.json({ ...publicSettings(reg.loadSettings(cid)), modelOptions: MODEL_OPTIONS });
   }
-  if (typeof model === 'string' && model.trim()) cur.model = model.trim();
-  if (clearApiKey === true) cur.anthropicApiKey = '';
-  else if (typeof anthropicApiKey === 'string' && anthropicApiKey.trim()) cur.anthropicApiKey = anthropicApiKey.trim();
-  reg.saveSettingsRow(cid, cur);
-  broadcastToCompany(cid, { type: 'settings', settings: publicSettings(cur) });
-  res.json(publicSettings(cur));
+  // グローバル app-settings.json をマスクして返す
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let s = {};
+  if (fs.existsSync(file)) {
+    try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  res.json({
+    anthropicApiKey: s.anthropicApiKey ? '****' : '',
+    githubPersonalToken: s.githubPersonalToken ? '****' : '',
+    githubCompanyToken: s.githubCompanyToken ? '****' : '',
+    repositories: Array.isArray(s.repositories) ? s.repositories : [],
+    model: s.model || 'claude-sonnet-4-20250514',
+    providerMode: s.providerMode || 'anthropic_api',
+    userName: s.userName || '',
+  });
 });
+
+app.post('/api/settings', (req, res) => {
+  const body = req.body || {};
+  // companyId 指定時は会社ごとの設定を更新（後方互換）
+  if (body.companyId) {
+    const cid = body.companyId;
+    if (!reg.getCompany(cid)) return res.status(404).json({ error: '会社不明' });
+    const cur = reg.loadSettings(cid);
+    const { providerMode, anthropicApiKey, model, clearApiKey } = body;
+    if (providerMode === 'tmux' || providerMode === 'anthropic_api') cur.providerMode = providerMode;
+    if (typeof model === 'string' && model.trim()) cur.model = model.trim();
+    if (clearApiKey === true) cur.anthropicApiKey = '';
+    else if (typeof anthropicApiKey === 'string' && anthropicApiKey.trim()) cur.anthropicApiKey = anthropicApiKey.trim();
+    reg.saveSettingsRow(cid, cur);
+    broadcastToCompany(cid, { type: 'settings', settings: publicSettings(cur) });
+    return res.json(publicSettings(cur));
+  }
+  // グローバル設定を merge 保存
+  const { anthropicApiKey, githubPersonalToken, githubCompanyToken, repositories, model, providerMode, userName } = body;
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let existing = {};
+  if (fs.existsSync(file)) {
+    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  const merged = { ...existing };
+  if (typeof anthropicApiKey === 'string' && anthropicApiKey.trim()) merged.anthropicApiKey = anthropicApiKey.trim();
+  if (typeof githubPersonalToken === 'string') merged.githubPersonalToken = githubPersonalToken.trim();
+  if (typeof githubCompanyToken === 'string') merged.githubCompanyToken = githubCompanyToken.trim();
+  if (Array.isArray(repositories)) merged.repositories = repositories;
+  if (typeof model === 'string' && model.trim()) merged.model = model.trim();
+  if (providerMode === 'tmux' || providerMode === 'anthropic_api') merged.providerMode = providerMode;
+  if (typeof userName === 'string') merged.userName = userName.trim();
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(merged, null, 2));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Global Settings (SetupWizard) ────────────────────────────────────────────
+
+app.get('/api/settings/status', (req, res) => {
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  if (!fs.existsSync(file)) return res.json({ isConfigured: false });
+  try {
+    const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+    res.json({ isConfigured: !!(s.anthropicApiKey && s.anthropicApiKey.trim()) });
+  } catch {
+    res.json({ isConfigured: false });
+  }
+});
+
+app.get('/api/settings/test-anthropic', async (req, res) => {
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let saved = {};
+  if (fs.existsSync(file)) {
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  // x-api-key ヘッダーがあればそちらを優先（セットアップウィザードからの未保存キーテスト用）
+  const apiKey = (req.headers['x-api-key'] || saved.anthropicApiKey || '').trim();
+  if (!apiKey) {
+    return res.status(400).json({ ok: false, error: 'APIキーが設定されていません' });
+  }
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    if (response.ok) {
+      return res.json({ ok: true });
+    }
+    let errMsg = `HTTP ${response.status}`;
+    try {
+      const j = await response.json();
+      errMsg = j.error?.message || errMsg;
+    } catch { /* ignore */ }
+    res.status(200).json({ ok: false, error: errMsg });
+  } catch (e) {
+    res.status(200).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/setup', (req, res) => {
+  const { anthropicApiKey, githubPersonalToken, githubCompanyToken } = req.body || {};
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let existing = {};
+  if (fs.existsSync(file)) {
+    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  const merged = { ...existing };
+  if (typeof anthropicApiKey === 'string') merged.anthropicApiKey = anthropicApiKey.trim();
+  if (typeof githubPersonalToken === 'string') merged.githubPersonalToken = githubPersonalToken.trim();
+  if (typeof githubCompanyToken === 'string') merged.githubCompanyToken = githubCompanyToken.trim();
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(merged, null, 2));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── GitHub API ──────────────────────────────────────────────────────────────
+
+function getGithubToken(tokenType) {
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let saved = {};
+  if (fs.existsSync(file)) {
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  if (tokenType === 'company') {
+    return saved.githubCompanyToken || process.env.GITHUB_COMPANY_TOKEN || null;
+  }
+  return saved.githubPersonalToken || process.env.GITHUB_PERSONAL_TOKEN || null;
+}
+
+// app-settings.json の repositories からリポジトリの permission を取得するヘルパー
+function getRepoPermission(owner, repo) {
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let saved = {};
+  if (fs.existsSync(file)) {
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  const repos = Array.isArray(saved.repositories) ? saved.repositories : [];
+  const found = repos.find((r) => r.owner === owner && r.repo === repo);
+  return found ? (found.permission || 'read') : 'read'; // デフォルトは read
+}
+
+app.get('/api/github/repos', async (req, res) => {
+  const tokenType = req.query.tokenType || 'personal';
+  // ?token= で生トークンを直接渡せる（ウィザード保存前のテスト用）
+  const token = req.query.token || getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await listRepositories(token);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json({ repos: result.data });
+});
+
+app.get('/api/github/repositories', (req, res) => {
+  const s = readAppSettings();
+  res.json({ repositories: Array.isArray(s.repositories) ? s.repositories : [] });
+});
+
+app.post('/api/github/repositories', (req, res) => {
+  const { repositories } = req.body || {};
+  if (!Array.isArray(repositories)) {
+    return res.status(400).json({ error: 'repositories は配列で指定してください' });
+  }
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  let existing = {};
+  if (fs.existsSync(file)) {
+    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
+  }
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ ...existing, repositories }, null, 2));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/github/file', async (req, res) => {
+  const { owner, repo, path: filePath, tokenType = 'personal' } = req.query;
+  if (!owner || !repo || !filePath) {
+    return res.status(400).json({ error: 'owner, repo, path は必須です' });
+  }
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const permission = getRepoPermission(owner, repo);
+  const result = await getFileContent(owner, repo, filePath, token, permission);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json(result.data);
+});
+
+app.post('/api/github/file', async (req, res) => {
+  const { owner, repo, path: filePath, content, message, tokenType = 'personal' } = req.body || {};
+  if (!owner || !repo || !filePath || content === undefined || !message) {
+    return res.status(400).json({ error: 'owner, repo, path, content, message は必須です' });
+  }
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const permission = getRepoPermission(owner, repo);
+  const result = await updateFileContent(owner, repo, filePath, content, message, token, permission);
+  if (!result.success) return res.status(403).json({ error: result.error });
+  res.json(result.data);
+});
+
+app.post('/api/github/pr', async (req, res) => {
+  const { owner, repo, title, body, head, base, tokenType = 'personal' } = req.body || {};
+  if (!owner || !repo || !title || !head || !base) {
+    return res.status(400).json({ error: 'owner, repo, title, head, base は必須です' });
+  }
+  const permission = getRepoPermission(owner, repo);
+  if (permission !== 'pr') {
+    return res.status(403).json({ error: 'このリポジトリはPR作成権限がありません' });
+  }
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await createPullRequest(owner, repo, title, body || '', head, base, token, permission);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json(result.data);
+});
+
+app.get('/api/github/tree', async (req, res) => {
+  const { owner, repo, tokenType = 'personal', branch } = req.query;
+  if (!owner || !repo) {
+    return res.status(400).json({ error: 'owner, repo は必須です' });
+  }
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await listFileTree(owner, repo, token, branch);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json({ tree: result.data });
+});
+
+// ── エージェント グローバルCRUD（companyId不要） ─────────────────────────────
+
+app.put('/api/agents/:id', (req, res) => {
+  const result = reg.updateAgentById(req.params.id, req.body || {});
+  if (!result) return res.status(404).json({ error: 'not found' });
+  broadcastToCompany(result.companyId, { type: 'agents', agents: agentsForWS(result.companyId) });
+  res.json(result.agent);
+});
+
+app.delete('/api/agents/:id', (req, res) => {
+  const companyId = reg.deleteAgentById(req.params.id);
+  if (!companyId) return res.status(404).json({ error: 'not found' });
+  broadcastToCompany(companyId, { type: 'agents', agents: agentsForWS(companyId) });
+  res.status(204).end();
+});
+
+// ── エージェント ステータス更新 ──────────────────────────────────────────────
+
+app.put('/api/agents/:id/status', (req, res) => {
+  const { status, progress, estimatedMinutes, currentTask, lastMessage } = req.body || {};
+  const patch = { lastActiveAt: new Date().toISOString() };
+  if (status !== undefined) patch.status = status;
+  if (progress !== undefined) patch.progress = Number(progress);
+  if (estimatedMinutes !== undefined) patch.estimatedMinutes = estimatedMinutes == null ? null : Number(estimatedMinutes);
+  if (currentTask !== undefined) patch.currentTask = currentTask;
+  if (lastMessage !== undefined) patch.lastMessage = lastMessage;
+
+  const result = reg.updateAgentById(req.params.id, patch);
+  if (!result) return res.status(404).json({ error: 'not found' });
+
+  broadcastToCompany(result.companyId, {
+    type: 'agent_status',
+    agentId: result.agent.id,
+    status: result.agent.status,
+    progress: result.agent.progress,
+    estimatedMinutes: result.agent.estimatedMinutes,
+    currentTask: result.agent.currentTask,
+    lastMessage: result.agent.lastMessage,
+    lastActiveAt: result.agent.lastActiveAt,
+  });
+  res.json(result.agent);
+});
+
+// ── JD更新承認フロー ─────────────────────────────────────────────────────────
+
+app.post('/api/agents/:id/jd-proposal', (req, res) => {
+  const { proposedJd } = req.body || {};
+  if (!proposedJd) return res.status(400).json({ error: 'proposedJd は必須です' });
+  const result = reg.updateAgentById(req.params.id, { pendingJdUpdate: proposedJd });
+  if (!result) return res.status(404).json({ error: 'not found' });
+  broadcastToCompany(result.companyId, { type: 'jd_proposal', agentId: result.agent.id, proposedJd });
+  res.json(result.agent);
+});
+
+app.post('/api/agents/:id/jd-approve', (req, res) => {
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  const newJd = found.agent.pendingJdUpdate;
+  if (!newJd) return res.status(400).json({ error: '承認待ちのJD更新がありません' });
+  const result = reg.updateAgentById(req.params.id, { jobDescription: newJd, pendingJdUpdate: null });
+  broadcastToCompany(result.companyId, { type: 'agents', agents: agentsForWS(result.companyId) });
+  res.json(result.agent);
+});
+
+app.post('/api/agents/:id/jd-reject', (req, res) => {
+  const result = reg.updateAgentById(req.params.id, { pendingJdUpdate: null });
+  if (!result) return res.status(404).json({ error: 'not found' });
+  broadcastToCompany(result.companyId, { type: 'agents', agents: agentsForWS(result.companyId) });
+  res.json(result.agent);
+});
+
+// ── スキルファイル一覧 ────────────────────────────────────────────────────────
+
+app.get('/api/skills', (req, res) => {
+  const skillsDir = path.join(__dirname, 'core', 'skills');
+  if (!fs.existsSync(skillsDir)) return res.json({ skills: [] });
+  try {
+    const files = fs.readdirSync(skillsDir)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => ({
+        id: `core/skills/${f}`,
+        name: f.replace(/\.md$/, ''),
+        path: `core/skills/${f}`,
+      }));
+    res.json({ skills: files });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── ワークスペース ────────────────────────────────────────────────────────────
+
+function readAppSettings() {
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  if (!fs.existsSync(file)) return {};
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
+}
+
+function writeAppSettings(merged) {
+  const file = path.join(DATA_DIR, 'app-settings.json');
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(merged, null, 2));
+}
+
+app.get('/api/workspace', (req, res) => {
+  const s = readAppSettings();
+  res.json(s.workspace || { owner: '', repo: '', tokenType: 'personal', localPath: '' });
+});
+
+app.post('/api/workspace', (req, res) => {
+  const { owner, repo, tokenType, localPath } = req.body || {};
+  const s = readAppSettings();
+  s.workspace = {
+    owner: owner || s.workspace?.owner || '',
+    repo: repo || s.workspace?.repo || '',
+    tokenType: tokenType || s.workspace?.tokenType || 'personal',
+    localPath: localPath !== undefined ? localPath : (s.workspace?.localPath || ''),
+  };
+  writeAppSettings(s);
+  res.json({ ok: true, workspace: s.workspace });
+});
+
+app.post('/api/workspace/clone', async (req, res) => {
+  const s = readAppSettings();
+  const workspace = s.workspace || {};
+  if (!workspace.owner || !workspace.repo) {
+    return res.status(400).json({ error: 'workspace.owner と repo を先に設定してください' });
+  }
+  if (!workspace.localPath || !workspace.localPath.trim()) {
+    return res.status(400).json({ error: 'workspace.localPath を設定してください' });
+  }
+  const result = await cloneWorkspace(workspace, getGithubToken);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  // クローン後に全クライアントへbroadcast
+  wss.clients.forEach((c) => {
+    if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: result.localPath }));
+  });
+  res.json({ ok: true, ...result });
+});
+
+// ── 秘書メッセージ（SSEストリーミング） ──────────────────────────────────────
+
+function buildSecretarySystemPrompt(companyId) {
+  const promptFile = path.join(__dirname, 'core', 'prompts', 'secretary.md');
+  let base = '';
+  if (fs.existsSync(promptFile)) {
+    try { base = fs.readFileSync(promptFile, 'utf8'); } catch {}
+  }
+
+  const agents = reg.loadAgents(companyId);
+  const s = readAppSettings();
+  const workspace = s.workspace || {};
+  const repos = Array.isArray(s.repositories) ? s.repositories : [];
+
+  // エージェント一覧
+  const agentLines = agents.map((a) => {
+    const skills = (a.skills || []).join(', ') || '(未設定)';
+    const repoIds = (a.repositories || []).join(', ') || '(未設定)';
+    return `${a.id}: ${a.name} / ${a.role} / status: ${a.status || 'idle'} / progress: ${a.progress || 0}%\n  Skills: ${skills}\n  Repositories: ${repoIds}\n  JD: ${a.jobDescription || '(未設定)'}`;
+  }).join('\n\n');
+
+  // リポジトリ一覧
+  const repoLines = repos.map((r) => `${r.id || r.repo}: ${r.name || r.repo} (${r.owner}/${r.repo}) - permission: ${r.permission || 'read'}`).join('\n');
+
+  const injection = `\n\n## Current Agents\n${agentLines || '(エージェントなし)'}\n\n## Available Repositories\n${repoLines || '(リポジトリなし)'}\n\n## Workspace\nlocalPath: ${workspace.localPath || '(未設定)'}`;
+
+  // ワークスペースコンテキスト
+  let wsCtx = '';
+  if (workspace.localPath) {
+    wsCtx = '\n\n## Workspace Context\n' + readWorkspaceContext(workspace.localPath);
+  }
+
+  return base + injection + wsCtx;
+}
+
+app.post('/api/secretary/message', async (req, res) => {
+  const { text, companyId: bodyCompanyId } = req.body || {};
+  const companyId = bodyCompanyId || reg.primaryCompanyId();
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ error: 'text は必須です' });
+  }
+
+  const s = readAppSettings();
+  const apiKey = s.anthropicApiKey || '';
+  if (!apiKey.trim()) {
+    return res.status(400).json({ error: 'Anthropic API キーが設定されていません' });
+  }
+
+  // SSEヘッダー
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendSSE = (data) => {
+    try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+  };
+
+  // 「おはよう」を含む場合はワークスペースをクローン
+  if (/おはよう/.test(text)) {
+    const workspace = s.workspace || {};
+    if (workspace.owner && workspace.repo && workspace.localPath) {
+      sendSSE({ type: 'token', content: 'ワークスペースを準備しています...\n' });
+      const cloneResult = await cloneWorkspace(workspace, getGithubToken);
+      if (cloneResult.success) {
+        wss.clients.forEach((c) => {
+          if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: cloneResult.localPath }));
+        });
+        sendSSE({ type: 'token', content: `ワークスペースの準備が完了しました。\n\n` });
+      } else {
+        sendSSE({ type: 'token', content: `ワークスペースの取得に失敗しました: ${cloneResult.error}\n\n` });
+      }
+    }
+  }
+
+  // 会話履歴を取得
+  const history = reg.loadConversation(companyId);
+  const model = s.model || 'claude-sonnet-4-20250514';
+  const system = buildSecretarySystemPrompt(companyId);
+
+  // 最新20件のみを messages に変換
+  const recentHistory = history.slice(-20);
+  const messages = [
+    ...recentHistory.map((m) => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: m.content,
+    })),
+    { role: 'user', content: String(text).trim() },
+  ];
+
+  // ユーザーメッセージを保存
+  reg.appendConversation(companyId, {
+    id: 'msg-' + Date.now(),
+    role: 'user',
+    agentId: null,
+    content: String(text).trim(),
+    delegations: [],
+    timestamp: new Date().toISOString(),
+  });
+
+  let fullResponse = '';
+  const agents = reg.loadAgents(companyId);
+
+  try {
+    await streamAnthropic({
+      apiKey,
+      model,
+      system,
+      messages,
+      onText: (chunk) => {
+        fullResponse += chunk;
+        sendSSE({ type: 'token', content: chunk });
+      },
+    });
+  } catch (e) {
+    sendSSE({ type: 'token', content: `\n[エラー: ${e.message}]` });
+    sendSSE({ type: 'done' });
+    res.end();
+    return;
+  }
+
+  // レスポンス解析・ブロック処理
+  const delegations = [];
+
+  // DELEGATE ブロック処理
+  const delegateRe = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"(?:\s+progress="(\d+)")?(?:\s+estimatedMinutes="(\d+)")?###/g;
+  let m;
+  while ((m = delegateRe.exec(fullResponse)) !== null) {
+    const [, agentId, task, progress = '0', estimatedMinutes] = m;
+    const agent = agents.find((a) => a.id === agentId);
+    if (agent) {
+      const patch = { status: 'working', currentTask: task, progress: Number(progress), lastActiveAt: new Date().toISOString() };
+      if (estimatedMinutes) patch.estimatedMinutes = Number(estimatedMinutes);
+      const result = reg.updateAgentById(agentId, patch);
+      if (result) {
+        broadcastToCompany(result.companyId, {
+          type: 'agent_status', agentId,
+          status: 'working', progress: Number(progress),
+          estimatedMinutes: estimatedMinutes ? Number(estimatedMinutes) : null,
+          currentTask: task, lastActiveAt: patch.lastActiveAt,
+        });
+      }
+      delegations.push({ agentId, task });
+      sendSSE({ type: 'delegation', agentId, agentName: agent.name, task });
+    }
+  }
+
+  // PROGRESS ブロック処理
+  const progressRe = /###PROGRESS\s+agentId="([^"]+)"\s+progress="(\d+)"(?:\s+estimatedMinutes="(\d+)")?(?:\s+currentTask="([^"]+)")?###/g;
+  while ((m = progressRe.exec(fullResponse)) !== null) {
+    const [, agentId, progress, estimatedMinutes, currentTask = ''] = m;
+    const patch = { progress: Number(progress), currentTask, lastActiveAt: new Date().toISOString() };
+    if (estimatedMinutes) patch.estimatedMinutes = Number(estimatedMinutes);
+    const result = reg.updateAgentById(agentId, patch);
+    if (result) {
+      broadcastToCompany(result.companyId, { type: 'agent_status', agentId, ...patch });
+    }
+  }
+
+  // JD_UPDATE ブロック処理
+  const jdRe = /###JD_UPDATE\s+agentId="([^"]+)"\s+proposedJd="([^"]+)"###/g;
+  while ((m = jdRe.exec(fullResponse)) !== null) {
+    const [, agentId, proposedJd] = m;
+    const agent = agents.find((a) => a.id === agentId);
+    const result = reg.updateAgentById(agentId, { pendingJdUpdate: proposedJd });
+    if (result) {
+      broadcastToCompany(result.companyId, { type: 'jd_proposal', agentId, proposedJd });
+      sendSSE({ type: 'jd_proposal', agentId, agentName: agent?.name || agentId, proposedJd });
+    }
+  }
+
+  // COMPLETED ブロック処理
+  const completedRe = /###COMPLETED\s+agentId="([^"]+)"###/g;
+  while ((m = completedRe.exec(fullResponse)) !== null) {
+    const [, agentId] = m;
+    const result = reg.updateAgentById(agentId, { status: 'completed', progress: 100, lastActiveAt: new Date().toISOString() });
+    if (result) {
+      broadcastToCompany(result.companyId, { type: 'agent_status', agentId, status: 'completed', progress: 100 });
+    }
+  }
+
+  // PR_REQUEST ブロック処理
+  const prReqRe = /###PR_REQUEST\s+owner="([^"]+)"\s+repo="([^"]+)"\s+title="([^"]+)"\s+body="([^"]*?)"\s+head="([^"]+)"\s+base="([^"]+)"###/g;
+  while ((m = prReqRe.exec(fullResponse)) !== null) {
+    const [, owner, repo, title, body, head, base] = m;
+    const permission = getRepoPermission(owner, repo);
+    if (permission === 'pr') {
+      const token = getGithubToken('personal');
+      if (token) {
+        const prResult = await createPullRequest(owner, repo, title, body, head, base, token, permission);
+        if (prResult.success) {
+          sendSSE({ type: 'pr_created', owner, repo, pullNumber: prResult.data.number, title });
+        }
+      }
+    }
+  }
+
+  // PR_MERGE ブロック処理
+  const prMergeRe = /###PR_MERGE\s+owner="([^"]+)"\s+repo="([^"]+)"\s+pullNumber="(\d+)"###/g;
+  while ((m = prMergeRe.exec(fullResponse)) !== null) {
+    const [, owner, repo, pullNumber] = m;
+    const permission = getRepoPermission(owner, repo);
+    if (permission === 'pr') {
+      const token = getGithubToken('personal');
+      if (token) await mergePullRequest(owner, repo, pullNumber, token, permission);
+    }
+  }
+
+  // 秘書メッセージを会話履歴に保存
+  reg.appendConversation(companyId, {
+    id: 'msg-' + (Date.now() + 1),
+    role: 'secretary',
+    agentId: null,
+    content: fullResponse,
+    delegations,
+    timestamp: new Date().toISOString(),
+  });
+
+  sendSSE({ type: 'done' });
+  res.end();
+});
+
+// 会話履歴取得
+app.get('/api/secretary/history', (req, res) => {
+  const companyId = req.query.companyId || reg.primaryCompanyId();
+  res.json({ messages: reg.loadConversation(companyId) });
+});
+
+// ── GitHub PR merge / list / get ────────────────────────────────────────────
+
+app.post('/api/github/pr/:owner/:repo/:pullNumber/merge', async (req, res) => {
+  const { owner, repo, pullNumber } = req.params;
+  const tokenType = (req.body && req.body.tokenType) || 'personal';
+  const permission = getRepoPermission(owner, repo);
+  if (permission !== 'pr') return res.status(403).json({ error: 'PRマージ権限がありません' });
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await mergePullRequest(owner, repo, pullNumber, token, permission);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json(result.data);
+});
+
+app.get('/api/github/pr/:owner/:repo', async (req, res) => {
+  const { owner, repo } = req.params;
+  const tokenType = req.query.tokenType || 'personal';
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await listPullRequests(owner, repo, token);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json({ pullRequests: result.data });
+});
+
+app.get('/api/github/pr/:owner/:repo/:pullNumber', async (req, res) => {
+  const { owner, repo, pullNumber } = req.params;
+  const tokenType = req.query.tokenType || 'personal';
+  const token = getGithubToken(tokenType);
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await getPullRequest(owner, repo, pullNumber, token);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json(result.data);
+});
+
+// ── Static pages ─────────────────────────────────────────────────────────────
 
 app.get('/settings', (req, res) => res.sendFile(path.join(__dirname, 'public', 'settings.html')));
 app.get('/company-manage', (req, res) => res.sendFile(path.join(__dirname, 'public', 'company-manage.html')));
