@@ -20,7 +20,7 @@ function waitForServer(maxMs = 15000) {
     const start = Date.now();
     const check = () => {
       const req = http.get(`http://127.0.0.1:${PORT}/api/settings/status`, (res) => {
-        res.resume(); // レスポンスボディを消費してソケットを解放
+        res.resume();
         resolve();
       });
       req.on('error', () => {
@@ -32,19 +32,34 @@ function waitForServer(maxMs = 15000) {
       });
       req.end();
     };
-    setTimeout(check, 200); // 起動直後の短い待機
+    setTimeout(check, 200);
   });
 }
 
 async function createWindow() {
-  process.env.AI_AGENTS_DATA_DIR = app.getPath('userData');
+  // 開発時 / 本番時のパス切り替え
+  const isDev = !app.isPackaged;
+  const resourcesPath = isDev
+    ? path.join(__dirname, '..')
+    : process.resourcesPath;
+
+  // userData: app-settings.json の保存先（本番）
+  const userDataPath = app.getPath('userData');
+  process.env.AI_AGENTS_DATA_DIR = userDataPath;
+  process.env.AI_AGENTS_RESOURCES_PATH = resourcesPath;
 
   // server.js を別プロセスとして fork する
-  serverProcess = fork(path.join(__dirname, '..', 'server.js'), [], {
+  const serverScript = isDev
+    ? path.join(__dirname, '..', 'server.js')
+    : path.join(resourcesPath, 'server.js');
+
+  serverProcess = fork(serverScript, [], {
     env: {
       ...process.env,
-      AI_AGENTS_ELECTRON: '0', // ランダムポートを使わず固定ポートで起動
+      AI_AGENTS_ELECTRON: '0',
       PORT: String(PORT),
+      RESOURCES_PATH: resourcesPath,
+      USER_DATA_PATH: userDataPath,
     },
     silent: false,
   });
@@ -84,6 +99,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
+    x: 100,
+    y: 100,
     minWidth: 960,
     minHeight: 620,
     title: appTitle,
@@ -91,22 +108,17 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
     },
-    show: false,
+    show: true,
     backgroundColor: '#060810',
   });
 
-  const isDev = process.env.NODE_ENV === 'development';
-
   if (isDev) {
-    // 開発時: Vite dev server（HMR 付き）をロード
     await mainWindow.loadURL('http://localhost:5173');
   } else {
-    // 本番時: Express が public_new/index.html を配信する
-    // ビルド成果物: path.join(__dirname, '../public_new/index.html')
     await mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
   }
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.focus();
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -129,7 +141,6 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-// アプリ終了時にサーバープロセスも確実に終了させる
 app.on('before-quit', () => {
   if (serverProcess) {
     serverProcess.kill();

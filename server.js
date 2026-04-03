@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { URL } = require('url');
+const os = require('os');
 
 const { publicSettings, MODEL_OPTIONS } = require('./lib/settings-store');
 const { ApiAgentBackend } = require('./lib/api-backend');
@@ -1788,6 +1789,164 @@ async function mainCli() {
     process.exit(1);
   }
 }
+
+// ── アクティビティログ ──────────────────────────────────────────────────────
+const MAX_LOG_ENTRIES = 1000;
+
+function getLogFilePath() {
+  const wsDir = path.join(os.homedir(), '.onecompanyops-workspace', '.onecompanyops');
+  if (fs.existsSync(path.join(os.homedir(), '.onecompanyops-workspace'))) {
+    try { fs.mkdirSync(wsDir, { recursive: true }); return path.join(wsDir, 'activity-log.json'); } catch {}
+  }
+  return path.join(os.homedir(), '.onecompanyops-activity-log.json');
+}
+
+function readActivityLog() {
+  const f = getLogFilePath();
+  if (!fs.existsSync(f)) return [];
+  try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return []; }
+}
+
+function writeActivityLog(entries) {
+  const f = getLogFilePath();
+  try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(entries, null, 2), 'utf8'); } catch {}
+}
+
+function logActivity(entry) {
+  const log = readActivityLog();
+  const record = {
+    id: 'act-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+    timestamp: new Date().toISOString(),
+    ...entry,
+  };
+  log.push(record);
+  if (log.length > MAX_LOG_ENTRIES) log.splice(0, log.length - MAX_LOG_ENTRIES);
+  writeActivityLog(log);
+  return record;
+}
+
+app.get('/api/activity-log', (req, res) => {
+  const { agentId, sectionName, taskId, destination, dateFrom, dateTo, limit } = req.query;
+  let log = readActivityLog();
+  if (agentId) log = log.filter((e) => e.agentId === agentId);
+  if (sectionName) log = log.filter((e) => e.sectionName === sectionName);
+  if (taskId) log = log.filter((e) => e.taskId === taskId);
+  if (destination) log = log.filter((e) => e.destination === destination);
+  if (dateFrom) { const from = new Date(dateFrom).getTime(); log = log.filter((e) => new Date(e.timestamp).getTime() >= from); }
+  if (dateTo) { const to = new Date(dateTo).getTime(); log = log.filter((e) => new Date(e.timestamp).getTime() <= to); }
+  const lim = limit ? parseInt(limit, 10) : 100;
+  res.json({ logs: log.slice(-lim).reverse() });
+});
+
+// ── 確認待ちアクション ────────────────────────────────────────────────────
+const pendingActions = new Map();
+
+app.post('/api/action/confirm', async (req, res) => {
+  const { pendingId, approved } = req.body || {};
+  if (!pendingId) return res.status(400).json({ error: 'pendingId is required' });
+  const pending = pendingActions.get(pendingId);
+  if (!pending) return res.status(404).json({ error: 'pending action not found or already processed' });
+  pendingActions.delete(pendingId);
+  if (!approved) return res.json({ ok: true, status: 'rejected' });
+  try {
+    let resultMsg = '実行しました';
+    if (pending.type === 'PR_MERGE') {
+      const token = getGithubToken?.('personal') || null;
+      if (token) {
+        await mergePullRequest(pending.owner, pending.repo, Number(pending.pullNumber), token);
+        resultMsg = `PRをマージしました: ${pending.owner}/${pending.repo}#${pending.pullNumber}`;
+      }
+    }
+    res.json({ ok: true, status: 'executed', message: resultMsg });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── セクション管理（インメモリ） ────────────────────────────────────────────
+let FIXED_SECTIONS = [
+  { id: 'president', name: '社長室' },
+  { id: 'backstage', name: 'BACKSTAGE事業部' },
+  { id: 'personal', name: '個人事業部' },
+  { id: 'music', name: '音楽事業部' },
+  { id: 'freelance', name: '業務委託事業部' },
+  { id: 'general', name: '統括' },
+];
+
+app.get('/api/sections', (req, res) => res.json(FIXED_SECTIONS));
+
+app.post('/api/sections', (req, res) => {
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const section = { id: 'sec-' + Date.now(), name };
+  FIXED_SECTIONS.push(section);
+  res.json(section);
+});
+
+app.put('/api/sections/:id', (req, res) => {
+  const { name } = req.body || {};
+  const idx = FIXED_SECTIONS.findIndex((s) => s.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  FIXED_SECTIONS[idx] = { ...FIXED_SECTIONS[idx], name };
+  res.json(FIXED_SECTIONS[idx]);
+});
+
+app.delete('/api/sections/:id', (req, res) => {
+  FIXED_SECTIONS = FIXED_SECTIONS.filter((s) => s.id !== req.params.id);
+  res.json({ ok: true });
+});
+
+// ── Workspace API ────────────────────────────────────────────────────────
+app.post('/api/workspace/init', async (req, res) => {
+  const { owner, repo, tokenType } = req.body || {};
+  if (!owner || !repo) return res.status(400).json({ error: 'owner and repo are required' });
+  try {
+    const { initWorkspace } = require('./lib/workspace-sync');
+    const s = readAppSettings ? readAppSettings() : {};
+    const token = (s.githubTokens || []).find((t) => t.type === (tokenType || 'personal'))?.value || '';
+    const result = await initWorkspace(owner, repo, token);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/workspace/path', (req, res) => {
+  const wsPath = path.join(os.homedir(), '.onecompanyops-workspace');
+  res.json({ path: wsPath, exists: fs.existsSync(wsPath) });
+});
+
+// ── Notion 連携テスト ────────────────────────────────────────────────────
+app.post('/api/integrations/notion/test', async (req, res) => {
+  const { apiKey } = req.body || {};
+  if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
+  try {
+    const r = await fetch('https://api.notion.com/v1/users/me', {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Notion-Version': '2022-06-28' },
+    });
+    if (!r.ok) return res.status(400).json({ ok: false, error: `HTTP ${r.status}` });
+    const data = await r.json();
+    res.json({ ok: true, name: data.name || data.id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/integrations/notion/databases', async (req, res) => {
+  const { apiKey } = req.query;
+  if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
+  try {
+    const r = await fetch('https://api.notion.com/v1/search', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filter: { value: 'database', property: 'object' }, page_size: 20 }),
+    });
+    const data = await r.json();
+    res.json({ databases: (data.results || []).map((d) => ({ id: d.id, title: d.title?.[0]?.plain_text || d.id })) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 startAutoGitSync(() => reg.listMeta(), 30 * 60 * 1000);
 

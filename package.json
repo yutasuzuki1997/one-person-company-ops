@@ -10,6 +10,7 @@
     "build": "vite build --config vite.config.js",
     "desktop": "npm run build && electron .",
     "desktop:dev": "concurrently \"npm run dev\" \"NODE_ENV=development electron .\"",
+    "generate-icon": "node scripts/generate-icon.js && bash scripts/create-icns.sh",
     "dist": "npm run build && electron-builder",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
@@ -33,6 +34,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "canvas": "^3.2.3",
     "concurrently": "^9.1.2",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
@@ -42,25 +44,42 @@
     "appId": "com.onecompanyops.app",
     "productName": "OneCompanyOps",
     "mac": {
-      "category": "public.app-category.productivity"
+      "icon": "assets/icons/icon.icns",
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ],
+      "dmg": {
+        "title": "OneCompanyOps",
+        "backgroundColor": "#0d0d1f"
+      }
     },
     "win": {
-      "target": "nsis"
+      "icon": "assets/icons/icon.png",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
     },
     "files": [
       "public_new/**/*",
       "electron/**/*",
       "lib/**/*",
       "core/**/*",
+      "skills/**/*",
       "server.js",
-      "package.json"
+      "package.json",
+      "node_modules/**/*"
     ],
     "extraResources": [
-      {
-        "from": "core/",
-        "to": "core/"
-      }
+      { "from": "core/", "to": "core/" },
+      { "from": "skills/", "to": "skills/" }
     ],
-    "asar": true
+    "asar": true,
+    "asarUnpack": ["node_modules/node-pty/**"],
+    "publish": {
+      "provider": "github",
+      "owner": "yutasuzuki1997",
+      "repo": "one-person-company-ops"
+    }
   }
 }

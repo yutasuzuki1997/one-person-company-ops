@@ -107,7 +107,14 @@ export default function SetupWizard({ onComplete }) {
   // { [`${idx}-${repoId}`]: { checked, displayName, description } }
   const [companySel, setCompanySel] = useState({});
 
-  // ── Step 3 / 4 ──
+  // ── Step 3: ワークスペース設定 ──
+  const [wsOwner, setWsOwner] = useState('yutasuzuki1997');
+  const [wsRepo, setWsRepo] = useState('Workspace');
+  const [wsStatus, setWsStatus] = useState(null); // null | 'ok' | 'ng'
+  const [wsMsg, setWsMsg] = useState('');
+  const [wsLoading, setWsLoading] = useState(false);
+
+  // ── Step 4 / 5 ──
   const [selectedRepos, setSelectedRepos] = useState([]);
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -235,6 +242,32 @@ export default function SetupWizard({ onComplete }) {
     return result;
   };
 
+  const testWorkspaceInit = async () => {
+    setWsLoading(true);
+    setWsStatus(null);
+    setWsMsg('');
+    try {
+      const res = await fetch('/api/workspace/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: wsOwner, repo: wsRepo }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setWsStatus('ok');
+        setWsMsg('Workspaceリポジトリに接続しました');
+      } else {
+        setWsStatus('ng');
+        setWsMsg(data.error || '接続に失敗しました');
+      }
+    } catch {
+      setWsStatus('ng');
+      setWsMsg('接続エラー');
+    } finally {
+      setWsLoading(false);
+    }
+  };
+
   const goToStep3 = () => {
     setSelectedRepos(buildSelectedRepos());
     setStep(3);
@@ -266,6 +299,13 @@ export default function SetupWizard({ onComplete }) {
       if (!reposRes.ok) {
         const d = await reposRes.json().catch(() => ({}));
         throw new Error(d.error || 'リポジトリ保存に失敗しました');
+      }
+      if (wsOwner.trim() && wsRepo.trim()) {
+        await fetch('/api/workspace', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ owner: wsOwner.trim(), repo: wsRepo.trim(), tokenType: 'personal', localPath: '' }),
+        });
       }
       onComplete();
     } catch (e) {
@@ -341,8 +381,8 @@ export default function SetupWizard({ onComplete }) {
 
         {/* ステップインジケーター */}
         <div style={s.stepRow}>
-          {[1, 2, 3, 4].map((n, i) => (
-            <div key={n} style={{ display: 'flex', alignItems: 'center', flex: i < 3 ? 1 : 'none' }}>
+          {[1, 2, 3, 4, 5].map((n, i) => (
+            <div key={n} style={{ display: 'flex', alignItems: 'center', flex: i < 4 ? 1 : 'none' }}>
               <div style={s.dot(step === n, step > n)}>{step > n ? '✓' : n}</div>
               {i < 3 && <div style={s.line(step > n)} />}
             </div>
@@ -529,8 +569,54 @@ export default function SetupWizard({ onComplete }) {
           </div>
         )}
 
-        {/* ── STEP 3: 登録リポジトリの確認 ── */}
+        {/* ── STEP 3: ワークスペース設定 ── */}
         {step === 3 && (
+          <div>
+            <div style={s.title}>ワークスペース設定</div>
+            <div style={s.subtitle}>
+              データを同期するWorkspaceリポジトリを設定してください。
+            </div>
+            <div style={s.sectionBox}>
+              <div style={s.sectionTitle}>ワークスペースリポジトリ</div>
+              <label style={s.label}>オーナー（owner）</label>
+              <input
+                type="text"
+                value={wsOwner}
+                onChange={(e) => setWsOwner(e.target.value)}
+                placeholder="yutasuzuki1997"
+                style={{ ...s.input, marginBottom: 12 }}
+                autoComplete="off"
+              />
+              <label style={s.label}>リポジトリ名（repo）</label>
+              <input
+                type="text"
+                value={wsRepo}
+                onChange={(e) => setWsRepo(e.target.value)}
+                placeholder="Workspace"
+                style={{ ...s.input, marginBottom: 14 }}
+                autoComplete="off"
+              />
+              <div style={{ ...s.row, marginBottom: 4 }}>
+                <button
+                  style={s.btnSmall}
+                  onClick={testWorkspaceInit}
+                  disabled={!wsOwner.trim() || !wsRepo.trim() || wsLoading}
+                >
+                  {wsLoading ? '接続中...' : '接続テスト'}
+                </button>
+                {wsStatus === 'ok' && <span style={s.ok}>✓ {wsMsg}</span>}
+                {wsStatus === 'ng' && <span style={s.ng}>✗ {wsMsg}</span>}
+              </div>
+            </div>
+            <div style={s.footer}>
+              <button style={s.btnSecondary} onClick={() => setStep(2)}>← 戻る</button>
+              <button style={s.btnPrimary} onClick={() => setStep(4)}>次へ →</button>
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 4: 登録リポジトリの確認 ── */}
+        {step === 4 && (
           <div>
             <div style={s.title}>登録リポジトリの確認</div>
             <div style={s.subtitle}>
@@ -561,14 +647,14 @@ export default function SetupWizard({ onComplete }) {
             )}
 
             <div style={s.footer}>
-              <button style={s.btnSecondary} onClick={() => setStep(2)}>修正する</button>
-              <button style={s.btnPrimary} onClick={() => setStep(4)}>次へ →</button>
+              <button style={s.btnSecondary} onClick={() => setStep(3)}>修正する</button>
+              <button style={s.btnPrimary} onClick={() => setStep(5)}>次へ →</button>
             </div>
           </div>
         )}
 
-        {/* ── STEP 4: 完了・保存 ── */}
-        {step === 4 && (
+        {/* ── STEP 5: 完了・保存 ── */}
+        {step === 5 && (
           <div>
             <div style={{ fontSize: 52, textAlign: 'center', marginBottom: 12 }}>🎉</div>
             <div style={s.title}>セットアップ完了</div>
@@ -590,7 +676,7 @@ export default function SetupWizard({ onComplete }) {
               {saveLoading ? '保存中...' : 'セットアップ完了'}
             </button>
             <div style={{ ...s.footer, marginTop: 16 }}>
-              <button style={s.btnSecondary} onClick={() => setStep(3)}>← 戻る</button>
+              <button style={s.btnSecondary} onClick={() => setStep(4)}>← 戻る</button>
               <span />
             </div>
           </div>
