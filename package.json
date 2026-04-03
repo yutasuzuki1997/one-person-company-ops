@@ -48,11 +48,11 @@
       "category": "public.app-category.productivity",
       "target": [
         { "target": "dmg", "arch": ["x64", "arm64"] }
-      ],
-      "dmg": {
-        "title": "OneCompanyOps",
-        "backgroundColor": "#0d0d1f"
-      }
+      ]
+    },
+    "dmg": {
+      "title": "OneCompanyOps",
+      "backgroundColor": "#0d0d1f"
     },
     "win": {
       "icon": "assets/icons/icon.png",
