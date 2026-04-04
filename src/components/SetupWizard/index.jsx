@@ -114,7 +114,18 @@ export default function SetupWizard({ onComplete }) {
   const [wsMsg, setWsMsg] = useState('');
   const [wsLoading, setWsLoading] = useState(false);
 
-  // ── Step 4 / 5 ──
+  // ── Step 4: Notion設定（任意） ──
+  const [notionToken, setNotionToken] = useState('');
+  const [notionTest, setNotionTest] = useState(null);
+  const [notionDatabases, setNotionDatabases] = useState([]);
+  const [notionSelectedDbs, setNotionSelectedDbs] = useState({});
+
+  // ── Step 5: Google Sheets設定（任意） ──
+  const [sheetsCredentials, setSheetsCredentials] = useState('');
+  const [sheetsSpreadsheetId, setSheetsSpreadsheetId] = useState('');
+  const [sheetsTest, setSheetsTest] = useState(null);
+
+  // ── Step 6 ──
   const [selectedRepos, setSelectedRepos] = useState([]);
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -269,14 +280,48 @@ export default function SetupWizard({ onComplete }) {
   };
 
   const goToStep3 = () => {
-    setSelectedRepos(buildSelectedRepos());
     setStep(3);
+  };
+
+  const testNotionToken = async () => {
+    setNotionTest('testing');
+    try {
+      const r = await fetch('/api/integrations/notion/test', { headers: { 'x-notion-token': notionToken } });
+      const d = await r.json();
+      setNotionTest(d.ok ? 'ok' : 'ng');
+      if (d.ok) {
+        // データベースを取得
+        const r2 = await fetch('/api/integrations/notion/databases', { headers: { 'x-notion-token': notionToken } });
+        const d2 = await r2.json();
+        if (d2.success) setNotionDatabases(d2.databases || []);
+      }
+    } catch { setNotionTest('ng'); }
+  };
+
+  const testSheetsConnection = async () => {
+    setSheetsTest('testing');
+    try {
+      // 一時的にsettingsに保存して接続テスト
+      const r = await fetch('/api/integrations/sheets/test');
+      const d = await r.json();
+      setSheetsTest(d.ok ? 'ok' : 'ng');
+    } catch { setSheetsTest('ng'); }
   };
 
   const saveSettings = async () => {
     setSaveLoading(true);
     setSaveError('');
     try {
+      const integrations = {};
+      if (notionToken.trim()) {
+        const selectedDbs = Object.entries(notionSelectedDbs).filter(([, v]) => v).map(([id]) => id);
+        integrations.notion = [{ id: 'notion-001', name: 'Notion', token: notionToken, selectedDatabases: selectedDbs }];
+      }
+      if (sheetsCredentials.trim()) {
+        let creds = sheetsCredentials;
+        try { creds = JSON.parse(sheetsCredentials); } catch {}
+        integrations.googleSheets = [{ id: 'sheets-001', name: 'スプレッドシート', credentials: creds, spreadsheetId: sheetsSpreadsheetId }];
+      }
       const settingsRes = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -285,6 +330,7 @@ export default function SetupWizard({ onComplete }) {
           githubPersonalToken: personalToken,
           githubCompanyToken: companyTokens[0]?.token || '',
           userName,
+          integrations,
         }),
       });
       if (!settingsRes.ok) {
@@ -381,10 +427,10 @@ export default function SetupWizard({ onComplete }) {
 
         {/* ステップインジケーター */}
         <div style={s.stepRow}>
-          {[1, 2, 3, 4, 5].map((n, i) => (
-            <div key={n} style={{ display: 'flex', alignItems: 'center', flex: i < 4 ? 1 : 'none' }}>
+          {[1, 2, 3, 4, 5, 6].map((n, i) => (
+            <div key={n} style={{ display: 'flex', alignItems: 'center', flex: i < 5 ? 1 : 'none' }}>
               <div style={s.dot(step === n, step > n)}>{step > n ? '✓' : n}</div>
-              {i < 3 && <div style={s.line(step > n)} />}
+              {i < 5 && <div style={s.line(step > n)} />}
             </div>
           ))}
         </div>
@@ -615,56 +661,119 @@ export default function SetupWizard({ onComplete }) {
           </div>
         )}
 
-        {/* ── STEP 4: 登録リポジトリの確認 ── */}
+        {/* ── STEP 4: Notion設定（任意） ── */}
         {step === 4 && (
           <div>
-            <div style={s.title}>登録リポジトリの確認</div>
-            <div style={s.subtitle}>
-              以下のリポジトリを登録します。問題があれば「修正する」で前に戻れます。
+            <div style={s.title}>Notion連携（任意）</div>
+            <div style={s.subtitle}>NotionのIntegration Tokenを入力してデータベースを選択してください。</div>
+            <div style={s.sectionBox}>
+              <label style={s.label}>Integration Token</label>
+              <div style={{ ...s.row, marginBottom: 8 }}>
+                <input
+                  type="password"
+                  value={notionToken}
+                  onChange={(e) => setNotionToken(e.target.value)}
+                  placeholder="secret_..."
+                  style={{ ...s.input, marginBottom: 0, flex: 1 }}
+                />
+                <button
+                  style={s.btnSmall}
+                  onClick={testNotionToken}
+                  disabled={!notionToken.trim() || notionTest === 'testing'}
+                >
+                  {notionTest === 'testing' ? '確認中...' : '接続テスト'}
+                </button>
+              </div>
+              {notionTest === 'ok' && <span style={s.ok}>✓ 接続成功</span>}
+              {notionTest === 'ng' && <span style={s.ng}>✗ 接続失敗</span>}
+              {notionDatabases.length > 0 && (
+                <div style={{ marginTop: 12, border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 12px' }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>使用するデータベース：</div>
+                  {notionDatabases.map((db) => (
+                    <label key={db.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={!!notionSelectedDbs[db.id]}
+                        onChange={(e) => setNotionSelectedDbs((p) => ({ ...p, [db.id]: e.target.checked }))}
+                      />
+                      <span style={{ fontSize: 13, color: '#111827' }}>{db.title}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
-
-            {selectedRepos.length === 0 ? (
-              <div style={{ fontSize: 14, color: '#9ca3af', marginBottom: 20 }}>
-                リポジトリが選択されていません（スキップして続行できます）。
-              </div>
-            ) : (
-              <div style={{ ...s.repoList, maxHeight: 280 }}>
-                {selectedRepos.map((r) => (
-                  <div key={r.id} style={{ ...s.repoItem, padding: '10px 4px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>{r.name}</span>
-                      <span style={r.tokenType === 'company' ? s.tagCompany : s.tag}>
-                        {r.tokenType === 'company' ? '会社' : '個人'}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
-                      {r.owner}/{r.repo}
-                      {r.description && <span style={{ marginLeft: 8 }}>— {r.description}</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
             <div style={s.footer}>
-              <button style={s.btnSecondary} onClick={() => setStep(3)}>修正する</button>
-              <button style={s.btnPrimary} onClick={() => setStep(5)}>次へ →</button>
+              <button style={s.btnSecondary} onClick={() => setStep(3)}>← 戻る</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button style={s.btnSecondary} onClick={() => setStep(5)}>スキップ</button>
+                <button style={s.btnPrimary} onClick={() => setStep(5)}>次へ →</button>
+              </div>
             </div>
           </div>
         )}
 
-        {/* ── STEP 5: 完了・保存 ── */}
+        {/* ── STEP 5: Google Sheets設定（任意） ── */}
         {step === 5 && (
+          <div>
+            <div style={s.title}>Google Sheets連携（任意）</div>
+            <div style={s.subtitle}>サービスアカウントJSONとスプレッドシートIDを入力してください。</div>
+            <div style={s.sectionBox}>
+              <label style={s.label}>サービスアカウントJSON</label>
+              <textarea
+                value={sheetsCredentials}
+                onChange={(e) => setSheetsCredentials(e.target.value)}
+                placeholder='{"type":"service_account","project_id":"...","client_email":"...",...}'
+                rows={4}
+                style={{ ...s.input, resize: 'vertical', fontFamily: 'monospace', fontSize: 11, marginBottom: 12 }}
+              />
+              <label style={s.label}>スプレッドシートID</label>
+              <div style={{ ...s.row, marginBottom: 8 }}>
+                <input
+                  value={sheetsSpreadsheetId}
+                  onChange={(e) => setSheetsSpreadsheetId(e.target.value)}
+                  placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+                  style={{ ...s.input, marginBottom: 0, flex: 1 }}
+                />
+                <button
+                  style={s.btnSmall}
+                  onClick={testSheetsConnection}
+                  disabled={!sheetsCredentials.trim() || sheetsTest === 'testing'}
+                >
+                  {sheetsTest === 'testing' ? '確認中...' : '接続テスト'}
+                </button>
+              </div>
+              {sheetsTest === 'ok' && <span style={s.ok}>✓ 接続成功</span>}
+              {sheetsTest === 'ng' && <span style={s.ng}>✗ 接続失敗</span>}
+            </div>
+            <div style={s.footer}>
+              <button style={s.btnSecondary} onClick={() => setStep(4)}>← 戻る</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button style={s.btnSecondary} onClick={() => { setSelectedRepos(buildSelectedRepos()); setStep(6); }}>スキップ</button>
+                <button style={s.btnPrimary} onClick={() => { setSelectedRepos(buildSelectedRepos()); setStep(6); }}>次へ →</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 6: 確認・完了 ── */}
+        {step === 6 && (
           <div>
             <div style={{ fontSize: 52, textAlign: 'center', marginBottom: 12 }}>🎉</div>
             <div style={s.title}>セットアップ完了</div>
-            <div style={{ ...s.subtitle, marginBottom: 24 }}>
-              設定を保存してアプリを起動します。
-              <br />
-              {selectedRepos.length > 0 && (
-                <span>登録リポジトリ: {selectedRepos.length} 件</span>
-              )}
+            <div style={{ ...s.subtitle, marginBottom: 16 }}>設定内容を確認して保存してください。</div>
+
+            <div style={s.sectionBox}>
+              <div style={s.sectionTitle}>設定サマリー</div>
+              <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.8 }}>
+                <div>Anthropic API: {anthropicKey ? '✓ 設定済み' : '✗ 未設定'}</div>
+                <div>GitHub Personal: {personalToken ? '✓ 設定済み' : '✗ 未設定'}</div>
+                <div>Workspace: {wsOwner}/{wsRepo}</div>
+                <div>Notion: {notionToken ? '✓ 設定済み' : 'スキップ'}</div>
+                <div>Google Sheets: {sheetsCredentials ? '✓ 設定済み' : 'スキップ'}</div>
+                {selectedRepos.length > 0 && <div>登録リポジトリ: {selectedRepos.length} 件</div>}
+              </div>
             </div>
+
             {saveError && (
               <div style={{ ...s.ng, marginBottom: 14, textAlign: 'center' }}>{saveError}</div>
             )}
@@ -676,7 +785,7 @@ export default function SetupWizard({ onComplete }) {
               {saveLoading ? '保存中...' : 'セットアップ完了'}
             </button>
             <div style={{ ...s.footer, marginTop: 16 }}>
-              <button style={s.btnSecondary} onClick={() => setStep(4)}>← 戻る</button>
+              <button style={s.btnSecondary} onClick={() => setStep(5)}>← 戻る</button>
               <span />
             </div>
           </div>

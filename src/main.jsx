@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import SetupWizard from './components/SetupWizard/index.jsx';
 import Dashboard from './components/Dashboard/index.jsx';
 import CompanyManager from './components/CompanyManager/index.jsx';
+import RoutineManager from './components/RoutineManager/index.jsx';
 
 // ── 設定画面 ────────────────────────────────────────────────────────────────
 function IntegrationAccountCard({ account, color, label, tokenField, tokenPlaceholder, onUpdate, onDelete, onTest }) {
@@ -74,9 +75,15 @@ function SettingsPage({ onNavigate }) {
   const [settings, setSettings] = useState(null);
   const [saved, setSaved] = useState(false);
   const [anthropicKey, setAnthropicKey] = useState('');
+  const [geminiKey, setGeminiKey] = useState('');
+  const [openaiKey, setOpenaiKey] = useState('');
   const [personalToken, setPersonalToken] = useState('');
   const [companyToken, setCompanyToken] = useState('');
-  const [model, setModel] = useState('claude-sonnet-4-20250514');
+  const [model, setModel] = useState('auto');
+  const [anthropicTest, setAnthropicTest] = useState(null);
+  const [wsOwner, setWsOwner] = useState('yutasuzuki1997');
+  const [wsRepo, setWsRepo] = useState('Workspace');
+  const [wsTest, setWsTest] = useState(null);
 
   // 複数アカウント用integrations
   const [notionAccounts, setNotionAccounts] = useState([]);
@@ -120,8 +127,12 @@ function SettingsPage({ onNavigate }) {
   const handleSave = async () => {
     const body = { model };
     if (anthropicKey.trim()) body.anthropicApiKey = anthropicKey.trim();
+    if (geminiKey.trim()) body.geminiApiKey = geminiKey.trim();
+    if (openaiKey.trim()) body.openaiApiKey = openaiKey.trim();
     if (personalToken.trim()) body.githubPersonalToken = personalToken.trim();
     if (companyToken.trim()) body.githubCompanyToken = companyToken.trim();
+    if (wsOwner.trim()) body.workspaceOwner = wsOwner.trim();
+    if (wsRepo.trim()) body.workspaceRepo = wsRepo.trim();
     body.integrations = {
       notion: notionAccounts,
       googleSheets: sheetsAccounts,
@@ -134,6 +145,24 @@ function SettingsPage({ onNavigate }) {
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const testAnthropicKey = async () => {
+    setAnthropicTest('testing');
+    try {
+      const r = await fetch('/api/settings/test-anthropic', { headers: { 'x-api-key': anthropicKey || 'current' } });
+      const d = await r.json();
+      setAnthropicTest(d.ok ? 'ok' : 'ng');
+    } catch { setAnthropicTest('ng'); }
+  };
+
+  const testWorkspace = async () => {
+    setWsTest('testing');
+    try {
+      const r = await fetch('/api/workspace/init', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner: wsOwner, repo: wsRepo }) });
+      const d = await r.json();
+      setWsTest(d.ok ? 'ok' : 'ng');
+    } catch { setWsTest('ng'); }
   };
 
   const addAccount = (setter, template) => setter((prev) => [...prev, { ...template, id: template.prefix + Date.now() }]);
@@ -173,38 +202,71 @@ function SettingsPage({ onNavigate }) {
       <div style={{ padding: 24, maxWidth: 600 }}>
         <h2 style={{ color: '#e2e8f0', fontSize: 20, fontWeight: 700, marginBottom: 24 }}>設定</h2>
 
-        {settings && (
-          <div style={{ marginBottom: 16, padding: '10px 14px', background: 'rgba(56,189,248,0.06)', border: '1px solid rgba(56,189,248,0.2)', borderRadius: 8, fontSize: 12, color: '#64748b' }}>
-            APIキー：{settings.anthropicApiKey || '未設定'}&nbsp;/&nbsp;
-            GitHubトークン：{settings.githubPersonalToken || '未設定'}
-          </div>
-        )}
-
-        {/* 基本設定 */}
-        <div style={sectionTitle}>基本設定</div>
-
-        {[
-          { label: 'Anthropic APIキー（変更する場合のみ入力）', value: anthropicKey, onChange: setAnthropicKey, placeholder: 'sk-ant-api03-...' },
-          { label: 'GitHub Personalトークン（変更する場合のみ）', value: personalToken, onChange: setPersonalToken, placeholder: 'ghp_...' },
-          { label: 'GitHub Companyトークン（変更する場合のみ）', value: companyToken, onChange: setCompanyToken, placeholder: 'ghp_...' },
-        ].map(({ label, value, onChange, placeholder }) => (
-          <div key={label} style={{ marginBottom: 16 }}>
-            <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>{label}</label>
-            <input type="password" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={inputStyle} />
-          </div>
-        ))}
+        {/* セクション1: AI接続設定 */}
+        <div style={sectionTitle}>AI接続設定</div>
 
         <div style={{ marginBottom: 16 }}>
-          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>モデル</label>
+          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>Anthropic API Key</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder="sk-ant-api03-..." style={{ ...inputStyle, flex: 1 }} />
+            <button onClick={testAnthropicKey} style={{ ...navBtnStyle, flexShrink: 0, color: anthropicTest === 'ok' ? '#22c55e' : anthropicTest === 'ng' ? '#ef4444' : '#94a3b8' }}>
+              {anthropicTest === 'testing' ? '確認中...' : anthropicTest === 'ok' ? '✓ 接続OK' : anthropicTest === 'ng' ? '✗ 失敗' : '接続テスト'}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>Google Gemini API Key（任意）</label>
+          <input type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder="AIza..." style={inputStyle} />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>OpenAI API Key（任意）</label>
+          <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} placeholder="sk-..." style={inputStyle} />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>デフォルトモデル</label>
           <select value={model} onChange={(e) => setModel(e.target.value)} style={inputStyle}>
-            <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
-            <option value="claude-opus-4-20250514">claude-opus-4-20250514</option>
-            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+            <option value="auto">自動（推奨）</option>
+            <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
+            <option value="claude-haiku-4-5-20251001">claude-haiku-4.5</option>
+            <option value="gemini-flash">gemini-flash</option>
+            <option value="gpt-4o">gpt-4o</option>
           </select>
         </div>
 
-        {/* 連携設定 */}
-        <div style={sectionTitle}>連携設定</div>
+        {/* セクション2: GitHub連携 */}
+        <div style={sectionTitle}>GitHub連携</div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>個人用トークン</label>
+          <input type="password" value={personalToken} onChange={(e) => setPersonalToken(e.target.value)} placeholder="ghp_..." style={inputStyle} />
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>会社用トークン（任意）</label>
+          <input type="password" value={companyToken} onChange={(e) => setCompanyToken(e.target.value)} placeholder="ghp_..." style={inputStyle} />
+        </div>
+
+        {/* セクション3: ワークスペース設定 */}
+        <div style={sectionTitle}>ワークスペース設定</div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>owner</label>
+            <input value={wsOwner} onChange={(e) => setWsOwner(e.target.value)} placeholder="yutasuzuki1997" style={inputStyle} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>repo</label>
+            <input value={wsRepo} onChange={(e) => setWsRepo(e.target.value)} placeholder="Workspace" style={inputStyle} />
+          </div>
+          <button onClick={testWorkspace} style={{ ...navBtnStyle, alignSelf: 'flex-end', flexShrink: 0, color: wsTest === 'ok' ? '#22c55e' : wsTest === 'ng' ? '#ef4444' : '#94a3b8' }}>
+            {wsTest === 'testing' ? '確認中...' : wsTest === 'ok' ? '✓ 接続OK' : wsTest === 'ng' ? '✗ 失敗' : '接続テスト'}
+          </button>
+        </div>
+
+        {/* セクション4-6: 連携設定 */}
+        <div style={sectionTitle}>外部サービス連携</div>
 
         {/* Notion */}
         <div style={{ marginBottom: 20, padding: '14px', background: 'rgba(15,23,42,0.5)', border: '1px solid rgba(51,65,85,0.4)', borderRadius: 10 }}>
@@ -231,15 +293,46 @@ function SettingsPage({ onNavigate }) {
         <div style={{ marginBottom: 20, padding: '14px', background: 'rgba(15,23,42,0.5)', border: '1px solid rgba(51,65,85,0.4)', borderRadius: 10 }}>
           {serviceHeader('#86efac', 'Google Sheets')}
           {sheetsAccounts.map((account) => (
-            <IntegrationAccountCard
-              key={account.id}
-              account={account}
-              color="#86efac"
-              tokenField="credentials"
-              tokenPlaceholder="認証情報JSON"
-              onUpdate={(id, patch) => updateAccount(setSheetsAccounts, id, patch)}
-              onDelete={(id) => deleteAccount(setSheetsAccounts, id)}
-            />
+            <div key={account.id} style={{ background: 'rgba(6,13,26,0.5)', border: '1px solid rgba(134,239,172,0.2)', borderRadius: 8, padding: '10px 12px', marginBottom: 10 }}>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                <input
+                  value={account.name || ''}
+                  onChange={(e) => updateAccount(setSheetsAccounts, account.id, { name: e.target.value })}
+                  placeholder="表示名"
+                  style={{ ...inputStyle, flex: 1, fontSize: 12 }}
+                />
+                <button
+                  onClick={() => deleteAccount(setSheetsAccounts, account.id)}
+                  style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', color: '#ef4444', borderRadius: 6, padding: '4px 10px', fontSize: 11, cursor: 'pointer' }}
+                >削除</button>
+              </div>
+              <textarea
+                value={typeof account.credentials === 'string' ? account.credentials : (account.credentials ? JSON.stringify(account.credentials) : '')}
+                onChange={(e) => {
+                  let parsed = e.target.value;
+                  try { parsed = JSON.parse(e.target.value); } catch {}
+                  updateAccount(setSheetsAccounts, account.id, { credentials: parsed });
+                }}
+                placeholder="サービスアカウントJSON（{...}）"
+                rows={3}
+                style={{ ...inputStyle, fontSize: 11, marginBottom: 8, resize: 'vertical' }}
+              />
+              <input
+                value={account.spreadsheetId || ''}
+                onChange={(e) => updateAccount(setSheetsAccounts, account.id, { spreadsheetId: e.target.value })}
+                placeholder="スプレッドシートID"
+                style={{ ...inputStyle, fontSize: 12, marginBottom: 8 }}
+              />
+              <button
+                onClick={async () => {
+                  const r = await fetch(`/api/integrations/sheets/test?accountId=${account.id}`);
+                  const d = await r.json();
+                  updateAccount(setSheetsAccounts, account.id, { testResult: d.ok ? 'ok' : 'ng' });
+                }}
+                style={{ background: 'rgba(134,239,172,0.08)', border: '1px solid rgba(134,239,172,0.25)', color: '#86efac', borderRadius: 6, padding: '4px 12px', fontSize: 11, cursor: 'pointer' }}
+              >接続テスト</button>
+              {account.testResult && <span style={{ fontSize: 11, marginLeft: 8, color: account.testResult === 'ok' ? '#22c55e' : '#ef4444' }}>{account.testResult === 'ok' ? '✓ 接続成功' : '✗ 失敗'}</span>}
+            </div>
           ))}
           <button
             onClick={() => addAccount(setSheetsAccounts, { prefix: 'sheets-', name: 'スプレッドシート', credentials: null, sheets: {} })}
@@ -264,12 +357,34 @@ function SettingsPage({ onNavigate }) {
                   style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', color: '#ef4444', borderRadius: 6, padding: '4px 10px', fontSize: 11, cursor: 'pointer' }}
                 >削除</button>
               </div>
+              <textarea
+                value={typeof account.credentials === 'string' ? account.credentials : (account.credentials ? JSON.stringify(account.credentials) : '')}
+                onChange={(e) => {
+                  let parsed = e.target.value;
+                  try { parsed = JSON.parse(e.target.value); } catch {}
+                  updateAccount(setGaAccounts, account.id, { credentials: parsed });
+                }}
+                placeholder="サービスアカウントJSON（{...}）"
+                rows={3}
+                style={{ ...inputStyle, fontSize: 11, marginBottom: 8, resize: 'vertical' }}
+              />
               <input
                 value={account.propertyId || ''}
                 onChange={(e) => updateAccount(setGaAccounts, account.id, { propertyId: e.target.value })}
-                placeholder="Property ID (G-XXXXXXXXXX)"
-                style={{ ...inputStyle, fontSize: 12 }}
+                placeholder="Property ID (例: 123456789)"
+                style={{ ...inputStyle, fontSize: 12, marginBottom: 8 }}
               />
+              <button
+                onClick={async () => {
+                  const config = { credentials: account.credentials, propertyId: account.propertyId };
+                  if (!config.credentials || !config.propertyId) return;
+                  const r = await fetch(`/api/integrations/ga4/test?accountId=${account.id}`);
+                  const d = await r.json();
+                  updateAccount(setGaAccounts, account.id, { testResult: d.ok ? 'ok' : 'ng' });
+                }}
+                style={{ background: 'rgba(252,165,165,0.08)', border: '1px solid rgba(252,165,165,0.25)', color: '#fca5a5', borderRadius: 6, padding: '4px 12px', fontSize: 11, cursor: 'pointer' }}
+              >接続テスト</button>
+              {account.testResult && <span style={{ fontSize: 11, marginLeft: 8, color: account.testResult === 'ok' ? '#22c55e' : '#ef4444' }}>{account.testResult === 'ok' ? '✓ 接続成功' : '✗ 失敗'}</span>}
             </div>
           ))}
           <button
@@ -325,6 +440,7 @@ function App() {
 
   if (!ready) return <SetupWizard onComplete={() => setReady(true)} />;
   if (page === 'companies') return <CompanyManager onNavigate={setPage} />;
+  if (page === 'routines') return <RoutineManager onNavigate={setPage} />;
   if (page === 'settings') return <SettingsPage onNavigate={setPage} />;
   return <Dashboard onNavigate={setPage} />;
 }
