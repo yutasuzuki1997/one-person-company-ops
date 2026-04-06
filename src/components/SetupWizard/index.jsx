@@ -362,7 +362,15 @@ export default function SetupWizard({ onComplete }) {
   };
 
   const canNext1 = anthropicKey.trim() !== '';
-  const canNext2 = personalToken.trim() !== '' || companyTokens.some((t) => t.token.trim() !== '');
+
+  const skipBtn = (nextStep) => (
+    <button
+      style={{ background: 'none', border: 'none', color: '#888', fontSize: 14, cursor: 'pointer', padding: '9px 12px' }}
+      onClick={() => setStep(nextStep)}
+    >
+      スキップ →
+    </button>
+  );
 
   // ── Repo list render helper ──
   const renderRepoList = (repos, selMap, onCheck, onNameChange, onDescChange, onPermChange) => {
@@ -604,13 +612,10 @@ export default function SetupWizard({ onComplete }) {
 
             <div style={s.footer}>
               <button style={s.btnSecondary} onClick={() => setStep(1)}>← 戻る</button>
-              <button
-                style={{ ...s.btnPrimary, opacity: canNext2 ? 1 : 0.45 }}
-                onClick={goToStep3}
-                disabled={!canNext2}
-              >
-                次へ →
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {skipBtn(3)}
+                <button style={s.btnPrimary} onClick={goToStep3}>次へ →</button>
+              </div>
             </div>
           </div>
         )}
@@ -656,7 +661,10 @@ export default function SetupWizard({ onComplete }) {
             </div>
             <div style={s.footer}>
               <button style={s.btnSecondary} onClick={() => setStep(2)}>← 戻る</button>
-              <button style={s.btnPrimary} onClick={() => setStep(4)}>次へ →</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {skipBtn(4)}
+                <button style={s.btnPrimary} onClick={() => setStep(4)}>次へ →</button>
+              </div>
             </div>
           </div>
         )}
@@ -704,8 +712,8 @@ export default function SetupWizard({ onComplete }) {
             </div>
             <div style={s.footer}>
               <button style={s.btnSecondary} onClick={() => setStep(3)}>← 戻る</button>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button style={s.btnSecondary} onClick={() => setStep(5)}>スキップ</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {skipBtn(5)}
                 <button style={s.btnPrimary} onClick={() => setStep(5)}>次へ →</button>
               </div>
             </div>
@@ -747,8 +755,8 @@ export default function SetupWizard({ onComplete }) {
             </div>
             <div style={s.footer}>
               <button style={s.btnSecondary} onClick={() => setStep(4)}>← 戻る</button>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button style={s.btnSecondary} onClick={() => { setSelectedRepos(buildSelectedRepos()); setStep(6); }}>スキップ</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {skipBtn(6)}
                 <button style={s.btnPrimary} onClick={() => { setSelectedRepos(buildSelectedRepos()); setStep(6); }}>次へ →</button>
               </div>
             </div>

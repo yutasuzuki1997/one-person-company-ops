@@ -6,7 +6,6 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { URL } = require('url');
-const os = require('os');
 
 const { publicSettings, MODEL_OPTIONS } = require('./lib/settings-store');
 const { ApiAgentBackend } = require('./lib/api-backend');
@@ -17,6 +16,16 @@ const { startAutoGitSync, syncWorkspace } = require('./lib/git-autosync');
 const { completeAnthropic, streamAnthropic } = require('./lib/anthropic-stream');
 const { listRepositories, getFileContent, updateFileContent, listFileTree, createPullRequest, mergePullRequest, listPullRequests, getPullRequest } = require('./lib/github-connector');
 const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
+const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
+const { logActivity, getActivityLog } = require('./lib/activity-logger');
+const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
+const { AgentExecutor, buildAgentSystemPrompt } = require('./lib/agent-executor');
+const notion = require('./lib/notion-connector');
+const sheets = require('./lib/sheets-connector');
+const ga4 = require('./lib/ga4-connector');
+
+// 確認待ち操作のキャッシュ（pendingId → 操作内容）
+const pendingActions = new Map();
 
 const knowledgeUpload = multer({
   storage: multer.memoryStorage(),
@@ -320,6 +329,38 @@ app.use(
   })
 );
 
+/* ── セクション（事業部）API ── /api/sections は /api/companies のエイリアス */
+const FIXED_SECTIONS = [
+  { id: 'president', name: '社長室' },
+  { id: 'backstage', name: 'BACKSTAGE事業部' },
+  { id: 'personal', name: '個人事業部' },
+  { id: 'music', name: '音楽事業部' },
+  { id: 'freelance', name: '業務委託事業部' },
+  { id: 'general', name: '統括' },
+];
+
+app.get('/api/sections', (req, res) => res.json(FIXED_SECTIONS));
+app.post('/api/sections', (req, res) => {
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const id = 'section-' + Date.now();
+  FIXED_SECTIONS.push({ id, name });
+  res.status(201).json({ id, name });
+});
+app.put('/api/sections/:id', (req, res) => {
+  const { name } = req.body || {};
+  const idx = FIXED_SECTIONS.findIndex((s) => s.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  if (name) FIXED_SECTIONS[idx].name = name;
+  res.json(FIXED_SECTIONS[idx]);
+});
+app.delete('/api/sections/:id', (req, res) => {
+  const idx = FIXED_SECTIONS.findIndex((s) => s.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  FIXED_SECTIONS.splice(idx, 1);
+  res.status(204).end();
+});
+
 /* ── 会社一覧・CRUD ── */
 app.get('/api/companies', (req, res) => {
   res.json(reg.listMeta());
@@ -444,6 +485,7 @@ app.post('/api/companies/:companyId/agents', withCompany, async (req, res) => {
       }
     }
     res.status(201).json({ agent, skillWarning });
+    fireAndForgetWorkspaceSave(req.cid, 'Add new agent');
   } catch (e) {
     res.status(500).json({ error: e.message || String(e) });
   }
@@ -879,6 +921,11 @@ app.get('/api/settings', (req, res) => {
   if (fs.existsSync(file)) {
     try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* ignore */ }
   }
+  const defaultIntegrations = {
+    notion: { token: '', databases: {} },
+    googleSheets: { credentials: null, sheets: {} },
+    googleAnalytics: { credentials: null, propertyId: '' },
+  };
   res.json({
     anthropicApiKey: s.anthropicApiKey ? '****' : '',
     githubPersonalToken: s.githubPersonalToken ? '****' : '',
@@ -887,6 +934,11 @@ app.get('/api/settings', (req, res) => {
     model: s.model || 'claude-sonnet-4-20250514',
     providerMode: s.providerMode || 'anthropic_api',
     userName: s.userName || '',
+    integrations: {
+      notion: { token: s.integrations?.notion?.token ? '****' : '', databases: s.integrations?.notion?.databases || {} },
+      googleSheets: s.integrations?.googleSheets || defaultIntegrations.googleSheets,
+      googleAnalytics: s.integrations?.googleAnalytics || defaultIntegrations.googleAnalytics,
+    },
   });
 });
 
@@ -907,7 +959,7 @@ app.post('/api/settings', (req, res) => {
     return res.json(publicSettings(cur));
   }
   // グローバル設定を merge 保存
-  const { anthropicApiKey, githubPersonalToken, githubCompanyToken, repositories, model, providerMode, userName } = body;
+  const { anthropicApiKey, githubPersonalToken, githubCompanyToken, repositories, model, providerMode, userName, integrations } = body;
   const file = path.join(DATA_DIR, 'app-settings.json');
   let existing = {};
   if (fs.existsSync(file)) {
@@ -921,6 +973,17 @@ app.post('/api/settings', (req, res) => {
   if (typeof model === 'string' && model.trim()) merged.model = model.trim();
   if (providerMode === 'tmux' || providerMode === 'anthropic_api') merged.providerMode = providerMode;
   if (typeof userName === 'string') merged.userName = userName.trim();
+  if (integrations && typeof integrations === 'object') {
+    merged.integrations = merged.integrations || {};
+    if (integrations.notion) {
+      merged.integrations.notion = merged.integrations.notion || {};
+      if (typeof integrations.notion.token === 'string' && integrations.notion.token.trim() && integrations.notion.token !== '****') {
+        merged.integrations.notion.token = integrations.notion.token.trim();
+      }
+    }
+    if (integrations.googleSheets) merged.integrations.googleSheets = integrations.googleSheets;
+    if (integrations.googleAnalytics) merged.integrations.googleAnalytics = integrations.googleAnalytics;
+  }
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(file, JSON.stringify(merged, null, 2));
@@ -930,7 +993,7 @@ app.post('/api/settings', (req, res) => {
   }
 });
 
-// ── Global Settings (SetupWizard) ────────────────────────────────────────────
+// ── Global Settings (SetupWizard) ────────────���────────────────────────��──────
 
 app.get('/api/settings/status', (req, res) => {
   const file = path.join(DATA_DIR, 'app-settings.json');
@@ -1116,6 +1179,20 @@ app.get('/api/github/tree', async (req, res) => {
   res.json({ tree: result.data });
 });
 
+// ── Workspace自動保存ヘルパー（fire-and-forget） ────────────────────────────
+
+function fireAndForgetWorkspaceSave(companyId, commitMessage) {
+  setImmediate(() => {
+    try {
+      const agents = reg.loadAgents(companyId);
+      saveToWorkspace({ agents }, commitMessage)
+        .catch((e) => console.error('[workspace-sync] error:', e.message));
+    } catch (e) {
+      console.error('[workspace-sync] error:', e.message);
+    }
+  });
+}
+
 // ── エージェント グローバルCRUD（companyId不要） ─────────────────────────────
 
 app.put('/api/agents/:id', (req, res) => {
@@ -1123,6 +1200,7 @@ app.put('/api/agents/:id', (req, res) => {
   if (!result) return res.status(404).json({ error: 'not found' });
   broadcastToCompany(result.companyId, { type: 'agents', agents: agentsForWS(result.companyId) });
   res.json(result.agent);
+  fireAndForgetWorkspaceSave(result.companyId, 'Update agent settings');
 });
 
 app.delete('/api/agents/:id', (req, res) => {
@@ -1130,33 +1208,7 @@ app.delete('/api/agents/:id', (req, res) => {
   if (!companyId) return res.status(404).json({ error: 'not found' });
   broadcastToCompany(companyId, { type: 'agents', agents: agentsForWS(companyId) });
   res.status(204).end();
-});
-
-// ── エージェント ステータス更新 ──────────────────────────────────────────────
-
-app.put('/api/agents/:id/status', (req, res) => {
-  const { status, progress, estimatedMinutes, currentTask, lastMessage } = req.body || {};
-  const patch = { lastActiveAt: new Date().toISOString() };
-  if (status !== undefined) patch.status = status;
-  if (progress !== undefined) patch.progress = Number(progress);
-  if (estimatedMinutes !== undefined) patch.estimatedMinutes = estimatedMinutes == null ? null : Number(estimatedMinutes);
-  if (currentTask !== undefined) patch.currentTask = currentTask;
-  if (lastMessage !== undefined) patch.lastMessage = lastMessage;
-
-  const result = reg.updateAgentById(req.params.id, patch);
-  if (!result) return res.status(404).json({ error: 'not found' });
-
-  broadcastToCompany(result.companyId, {
-    type: 'agent_status',
-    agentId: result.agent.id,
-    status: result.agent.status,
-    progress: result.agent.progress,
-    estimatedMinutes: result.agent.estimatedMinutes,
-    currentTask: result.agent.currentTask,
-    lastMessage: result.agent.lastMessage,
-    lastActiveAt: result.agent.lastActiveAt,
-  });
-  res.json(result.agent);
+  fireAndForgetWorkspaceSave(companyId, 'Remove agent');
 });
 
 // ── JD更新承認フロー ─────────────────────────────────────────────────────────
@@ -1178,6 +1230,7 @@ app.post('/api/agents/:id/jd-approve', (req, res) => {
   const result = reg.updateAgentById(req.params.id, { jobDescription: newJd, pendingJdUpdate: null });
   broadcastToCompany(result.companyId, { type: 'agents', agents: agentsForWS(result.companyId) });
   res.json(result.agent);
+  fireAndForgetWorkspaceSave(result.companyId, 'Update agent JD');
 });
 
 app.post('/api/agents/:id/jd-reject', (req, res) => {
@@ -1185,6 +1238,148 @@ app.post('/api/agents/:id/jd-reject', (req, res) => {
   if (!result) return res.status(404).json({ error: 'not found' });
   broadcastToCompany(result.companyId, { type: 'agents', agents: agentsForWS(result.companyId) });
   res.json(result.agent);
+});
+
+// ── activeStreams（作業中の精密管理） ──────────────────────────────────────────
+const activeStreams = new Map(); // key: agentId, value: { startTime, taskId }
+
+function streamStart(agentId, taskId, companyId) {
+  activeStreams.set(agentId, { startTime: Date.now(), taskId: taskId || null });
+  if (companyId) broadcastToCompany(companyId, { type: 'stream_start', agentId, taskId: taskId || null });
+}
+
+function streamEnd(agentId, taskId, companyId) {
+  activeStreams.delete(agentId);
+  if (companyId) broadcastToCompany(companyId, { type: 'stream_end', agentId, taskId: taskId || null });
+}
+
+app.get('/api/agents/active-streams', (req, res) => {
+  const result = {};
+  for (const [agentId, data] of activeStreams.entries()) result[agentId] = data;
+  res.json(result);
+});
+
+// ── エージェントチャット（エージェントへの直接指示） ────────────────────────
+
+function getAgentChatDir(companyId) {
+  const dir = path.join(DATA_DIR, 'companies', companyId, 'agent-chats');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function loadAgentChat(companyId, agentId) {
+  const p = path.join(getAgentChatDir(companyId), `${agentId}.json`);
+  if (!fs.existsSync(p)) return [];
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return []; }
+}
+
+function saveAgentChat(companyId, agentId, messages) {
+  const p = path.join(getAgentChatDir(companyId), `${agentId}.json`);
+  fs.writeFileSync(p, JSON.stringify(messages, null, 2), 'utf8');
+}
+
+// Anthropicメッセージコンテンツ（テキスト＋画像添付）を構築
+function buildMessageContent(text, attachments) {
+  if (!attachments || attachments.length === 0) return text || '';
+  const content = [];
+  for (const att of attachments) {
+    if (att.type === 'image' && att.base64) {
+      content.push({ type: 'image', source: { type: 'base64', media_type: att.mimeType || 'image/jpeg', data: att.base64 } });
+    }
+  }
+  if (text) content.push({ type: 'text', text });
+  return content.length === 0 ? (text || '') : content.length === 1 && content[0].type === 'text' ? text : content;
+}
+
+app.get('/api/agents/:id/chat', (req, res) => {
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  res.json({ messages: loadAgentChat(found.companyId, req.params.id) });
+});
+
+app.post('/api/agents/:id/chat', async (req, res) => {
+  const { message, attachments } = req.body || {};
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  const { agent, companyId } = found;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  const sendSSE = (data) => { try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {} };
+
+  const s = readAppSettings();
+  const apiKey = s.anthropicApiKey || '';
+  if (!apiKey.trim()) {
+    sendSSE({ type: 'error', message: 'APIキーが未設定です' });
+    sendSSE({ type: 'done' });
+    res.end();
+    return;
+  }
+
+  const userMsg = {
+    id: 'msg-' + Date.now(),
+    role: 'user',
+    content: String(message || '').trim(),
+    attachments: attachments || [],
+    timestamp: new Date().toISOString(),
+  };
+  const chatHistory = loadAgentChat(companyId, req.params.id);
+  chatHistory.push(userMsg);
+  saveAgentChat(companyId, req.params.id, chatHistory);
+
+  const personality = agent.persona?.personality || '';
+  const speechStyle = agent.persona?.speechStyle || '';
+  const agentSystem = `あなたは${agent.displayName || agent.name}（${agent.role}）です。
+鈴木裕太（Yuta Suzuki）の直接指示を受けて作業を行います。
+${personality ? `性格: ${personality}` : ''}
+${speechStyle ? `話し方: ${speechStyle}` : ''}
+${agent.jobDescription ? `職務内容: ${agent.jobDescription}` : ''}
+簡潔に返答し、作業結果を報告してください。日本語で返答すること。`;
+
+  const recentHistory = chatHistory.slice(-11, -1);
+  const apiMessages = [
+    ...recentHistory.map((m) => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: buildMessageContent(m.content, m.attachments),
+    })),
+    { role: 'user', content: buildMessageContent(userMsg.content, attachments) },
+  ];
+
+  streamStart(req.params.id, null, companyId);
+  let fullResponse = '';
+  try {
+    await streamAnthropic({
+      apiKey,
+      model: s.model || 'claude-sonnet-4-20250514',
+      system: agentSystem,
+      messages: apiMessages,
+      onText: (chunk) => {
+        fullResponse += chunk;
+        sendSSE({ type: 'token', content: chunk });
+      },
+    });
+  } catch (e) {
+    const errMsg = e.isCredit
+      ? 'APIクレジットが不足しています。設定画面でAPIキーを確認してください。'
+      : e.message;
+    sendSSE({ type: 'error', message: errMsg });
+  }
+
+  const agentMsg = {
+    id: 'msg-' + (Date.now() + 1),
+    role: 'agent',
+    content: fullResponse,
+    timestamp: new Date().toISOString(),
+  };
+  const updatedHistory = loadAgentChat(companyId, req.params.id);
+  updatedHistory.push(agentMsg);
+  saveAgentChat(companyId, req.params.id, updatedHistory);
+
+  streamEnd(req.params.id, null, companyId);
+  sendSSE({ type: 'done' });
+  res.end();
 });
 
 // ── スキルファイル一覧 ────────────────────────────────────────────────────────
@@ -1256,6 +1451,30 @@ app.post('/api/workspace/clone', async (req, res) => {
   res.json({ ok: true, ...result });
 });
 
+app.post('/api/workspace/init', async (req, res) => {
+  const { owner: bodyOwner, repo: bodyRepo } = req.body || {};
+  const s = readAppSettings();
+  const workspace = s.workspace || {};
+  const owner = bodyOwner || workspace.owner;
+  const repo = bodyRepo || workspace.repo;
+  if (!owner || !repo) {
+    return res.status(400).json({ error: 'owner と repo を指定してください' });
+  }
+  const token = getGithubToken(workspace.tokenType || 'personal');
+  if (!token) return res.status(400).json({ error: 'GitHub トークンが設定されていません' });
+  const result = await initWorkspace(owner, repo, token);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  syncSkillsFromWorkspace();
+  wss.clients.forEach((c) => {
+    if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: getWorkspacePath() }));
+  });
+  res.json({ ok: true, localPath: getWorkspacePath(), data: result.data });
+});
+
+app.get('/api/workspace/path', (req, res) => {
+  res.json({ path: getWorkspacePath() });
+});
+
 // ── 秘書メッセージ（SSEストリーミング） ──────────────────────────────────────
 
 function buildSecretarySystemPrompt(companyId) {
@@ -1270,17 +1489,20 @@ function buildSecretarySystemPrompt(companyId) {
   const workspace = s.workspace || {};
   const repos = Array.isArray(s.repositories) ? s.repositories : [];
 
-  // エージェント一覧
+  // エージェント一覧（ペルソナ情報を含む）
   const agentLines = agents.map((a) => {
     const skills = (a.skills || []).join(', ') || '(未設定)';
     const repoIds = (a.repositories || []).join(', ') || '(未設定)';
-    return `${a.id}: ${a.name} / ${a.role} / status: ${a.status || 'idle'} / progress: ${a.progress || 0}%\n  Skills: ${skills}\n  Repositories: ${repoIds}\n  JD: ${a.jobDescription || '(未設定)'}`;
+    const displayName = a.displayName || a.name;
+    const personality = a.persona?.personality || '';
+    const speechStyle = a.persona?.speechStyle || '';
+    return `${a.id}: ${displayName}（${a.name}）/ ${a.role} / status: ${a.status || 'idle'} / progress: ${a.progress || 0}%\n  性格: ${personality || '(未設定)'}\n  話し方: ${speechStyle || '(未設定)'}\n  Skills: ${skills}\n  Repositories: ${repoIds}\n  JD: ${a.jobDescription || '(未設定)'}`;
   }).join('\n\n');
 
   // リポジトリ一覧
   const repoLines = repos.map((r) => `${r.id || r.repo}: ${r.name || r.repo} (${r.owner}/${r.repo}) - permission: ${r.permission || 'read'}`).join('\n');
 
-  const injection = `\n\n## Current Agents\n${agentLines || '(エージェントなし)'}\n\n## Available Repositories\n${repoLines || '(リポジトリなし)'}\n\n## Workspace\nlocalPath: ${workspace.localPath || '(未設定)'}`;
+  const injection = `\n\n## Current Agents（各エージェントのペルソナを把握して名前で呼ぶこと）\n${agentLines || '(エージェントなし)'}\n\n## Available Repositories\n${repoLines || '(リポジトリなし)'}\n\n## Workspace\nlocalPath: ${workspace.localPath || '(未設定)'}`;
 
   // ワークスペースコンテキスト
   let wsCtx = '';
@@ -1292,11 +1514,12 @@ function buildSecretarySystemPrompt(companyId) {
 }
 
 app.post('/api/secretary/message', async (req, res) => {
-  const { text, companyId: bodyCompanyId } = req.body || {};
+  const { text, companyId: bodyCompanyId, attachments: bodyAttachments } = req.body || {};
   const companyId = bodyCompanyId || reg.primaryCompanyId();
   if (!text || !String(text).trim()) {
     return res.status(400).json({ error: 'text は必須です' });
   }
+  const msgAttachments = Array.isArray(bodyAttachments) ? bodyAttachments : [];
 
   const s = readAppSettings();
   const apiKey = s.anthropicApiKey || '';
@@ -1314,19 +1537,52 @@ app.post('/api/secretary/message', async (req, res) => {
     try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
   };
 
-  // 「おはよう」を含む場合はワークスペースをクローン
+  // 「組織を最新に」等の同期コマンド
+  if (/組織を最新に|エージェントを更新して|sync|同期して/i.test(text)) {
+    const workspace = s.workspace || {};
+    if (workspace.owner && workspace.repo) {
+      const wsToken = getGithubToken(workspace.tokenType || 'personal');
+      if (wsToken) {
+        sendSSE({ type: 'token', content: '組織情報を同期しています...\n' });
+        const initResult = await initWorkspace(workspace.owner, workspace.repo, wsToken);
+        if (initResult.success) {
+          syncSkillsFromWorkspace();
+          const agentList = reg.loadAgents(companyId);
+          sendSSE({ type: 'token', content: `${agentList.length}名のエージェント情報を更新しました。\n` });
+          broadcastToCompany(companyId, { type: 'agents_reloaded' });
+        } else {
+          sendSSE({ type: 'token', content: `同期に失敗しました: ${initResult.error}\n` });
+        }
+      }
+    }
+    sendSSE({ type: 'done' });
+    res.end();
+    return;
+  }
+
+  // 「おはよう」を含む場合はWorkspaceを同期してエージェント情報を読み込む
   if (/おはよう/.test(text)) {
     const workspace = s.workspace || {};
-    if (workspace.owner && workspace.repo && workspace.localPath) {
-      sendSSE({ type: 'token', content: 'ワークスペースを準備しています...\n' });
-      const cloneResult = await cloneWorkspace(workspace, getGithubToken);
-      if (cloneResult.success) {
-        wss.clients.forEach((c) => {
-          if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: cloneResult.localPath }));
-        });
-        sendSSE({ type: 'token', content: `ワークスペースの準備が完了しました。\n\n` });
-      } else {
-        sendSSE({ type: 'token', content: `ワークスペースの取得に失敗しました: ${cloneResult.error}\n\n` });
+    if (workspace.owner && workspace.repo) {
+      const wsToken = getGithubToken(workspace.tokenType || 'personal');
+      if (wsToken) {
+        sendSSE({ type: 'token', content: 'ワークスペースを同期しています...\n' });
+        const initResult = await initWorkspace(workspace.owner, workspace.repo, wsToken);
+        if (initResult.success) {
+          wss.clients.forEach((c) => {
+            if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: getWorkspacePath() }));
+          });
+          syncSkillsFromWorkspace();
+          sendSSE({ type: 'token', content: 'エージェント情報を読み込みました。\n' });
+          const agentList = reg.loadAgents(companyId);
+          sendSSE({ type: 'token', content: `本日もよろしくお願いします。${agentList.length}名のスタッフが待機中です。\n` });
+          if (agentList.length > 0) {
+            const summary = agentList.map((a) => `- ${a.name}（${a.role}）: ${a.status || 'idle'}`).join('\n');
+            sendSSE({ type: 'token', content: `\n### スタッフ一覧\n${summary}\n\n` });
+          }
+        } else {
+          sendSSE({ type: 'token', content: `ワークスペース同期に失敗しました: ${initResult.error}\n\n` });
+        }
       }
     }
   }
@@ -1341,9 +1597,9 @@ app.post('/api/secretary/message', async (req, res) => {
   const messages = [
     ...recentHistory.map((m) => ({
       role: m.role === 'user' ? 'user' : 'assistant',
-      content: m.content,
+      content: buildMessageContent(m.content, m.attachments),
     })),
-    { role: 'user', content: String(text).trim() },
+    { role: 'user', content: buildMessageContent(String(text).trim(), msgAttachments) },
   ];
 
   // ユーザーメッセージを保存
@@ -1359,6 +1615,7 @@ app.post('/api/secretary/message', async (req, res) => {
   let fullResponse = '';
   const agents = reg.loadAgents(companyId);
 
+  streamStart('secretary', null, companyId);
   try {
     await streamAnthropic({
       apiKey,
@@ -1371,11 +1628,17 @@ app.post('/api/secretary/message', async (req, res) => {
       },
     });
   } catch (e) {
-    sendSSE({ type: 'token', content: `\n[エラー: ${e.message}]` });
+    streamEnd('secretary', null, companyId);
+    if (e.isCredit) {
+      sendSSE({ type: 'error', message: 'APIクレジットが不足しています。設定画面でAPIキーを確認してください。' });
+    } else {
+      sendSSE({ type: 'token', content: `\n[エラー: ${e.message}]` });
+    }
     sendSSE({ type: 'done' });
     res.end();
     return;
   }
+  streamEnd('secretary', null, companyId);
 
   // レスポンス解析・ブロック処理
   const delegations = [];
@@ -1388,7 +1651,9 @@ app.post('/api/secretary/message', async (req, res) => {
     const agent = agents.find((a) => a.id === agentId);
     if (agent) {
       const patch = { status: 'working', currentTask: task, progress: Number(progress), lastActiveAt: new Date().toISOString() };
+      // estimatedMinutesは明示的に指定がある場合のみ設定（デフォルト5分などの固定値を避ける）
       if (estimatedMinutes) patch.estimatedMinutes = Number(estimatedMinutes);
+      else patch.estimatedMinutes = null;
       const result = reg.updateAgentById(agentId, patch);
       if (result) {
         broadcastToCompany(result.companyId, {
@@ -1399,7 +1664,34 @@ app.post('/api/secretary/message', async (req, res) => {
         });
       }
       delegations.push({ agentId, task });
-      sendSSE({ type: 'delegation', agentId, agentName: agent.name, task });
+      sendSSE({ type: 'delegation', agentId, agentName: agent.displayName || agent.name, task });
+
+      // AgentExecutorでバックグラウンド実行
+      const s = readAppSettings();
+      const execApiKey = s.anthropicApiKey || '';
+      const execModel = s.model || 'claude-sonnet-4-20250514';
+      if (execApiKey.trim()) {
+        const executor = new AgentExecutor({
+          apiKey: execApiKey,
+          model: execModel,
+          companyId,
+          agents,
+          broadcast: (msg) => broadcastToCompany(companyId, msg),
+          skillsDir: path.join(__dirname, 'core', 'skills'),
+        });
+        console.log(`[AgentExecutor] 起動: ${agent.displayName || agent.name} - ${task.slice(0, 50)}...`);
+        executor.execute(agent, task, 'task-exec-' + Date.now()).then((result) => {
+          const agentName = agent.displayName || agent.name;
+          console.log(`[AgentExecutor] 完了: ${agentName}`);
+          broadcastToCompany(companyId, {
+            type: 'agent_completed', agentId, agentName,
+            message: `${agentName}が作業を完了しました`,
+            taskId: null, success: true,
+          });
+        }).catch((err) => {
+          console.error(`[AgentExecutor] エラー: ${agent.displayName || agent.name}`, err.message);
+        });
+      }
     }
   }
 
@@ -1407,7 +1699,17 @@ app.post('/api/secretary/message', async (req, res) => {
   const progressRe = /###PROGRESS\s+agentId="([^"]+)"\s+progress="(\d+)"(?:\s+estimatedMinutes="(\d+)")?(?:\s+currentTask="([^"]+)")?###/g;
   while ((m = progressRe.exec(fullResponse)) !== null) {
     const [, agentId, progress, estimatedMinutes, currentTask = ''] = m;
-    const patch = { progress: Number(progress), currentTask, lastActiveAt: new Date().toISOString() };
+    const newProgress = Number(progress);
+
+    // 進捗後退防止：前回より小さい値は警告して無視
+    const existingAgent = agents.find((a) => a.id === agentId);
+    if (existingAgent && existingAgent.progress > newProgress) {
+      console.warn(`[warn] ${existingAgent.name}: progress後退を検知 (${existingAgent.progress}% → ${newProgress}%) - 無視します`);
+      continue;
+    }
+
+    const patch = { progress: newProgress, currentTask, lastActiveAt: new Date().toISOString() };
+    // estimatedMinutesが指定されていない場合はnullのまま（デフォルト値を入れない）
     if (estimatedMinutes) patch.estimatedMinutes = Number(estimatedMinutes);
     const result = reg.updateAgentById(agentId, patch);
     if (result) {
@@ -1427,42 +1729,321 @@ app.post('/api/secretary/message', async (req, res) => {
     }
   }
 
-  // COMPLETED ブロック処理
-  const completedRe = /###COMPLETED\s+agentId="([^"]+)"###/g;
+  // COMPLETED ブロック処理 → "review"（FB待ち）に遷移
+  // 拡張構文: ###COMPLETED agentId="..." savedTo="github" savedPath="owner/repo/path" summary="説明"###
+  const completedRe = /###COMPLETED\s+agentId="([^"]+)"(?:\s+savedTo="([^"]*)")?(?:\s+savedPath="([^"]*)")?(?:\s+taskId="([^"]*)")?(?:\s+summary="([^"]*)")?###/g;
   while ((m = completedRe.exec(fullResponse)) !== null) {
-    const [, agentId] = m;
-    const result = reg.updateAgentById(agentId, { status: 'completed', progress: 100, lastActiveAt: new Date().toISOString() });
+    const [, agentId, savedTo, savedPath, completedTaskId, completedSummary] = m;
+    const agent = agents.find((a) => a.id === agentId);
+    const result = reg.updateAgentById(agentId, { status: 'review', progress: 100, lastActiveAt: new Date().toISOString() });
     if (result) {
-      broadcastToCompany(result.companyId, { type: 'agent_status', agentId, status: 'completed', progress: 100 });
+      broadcastToCompany(result.companyId, { type: 'agent_status', agentId, status: 'review', progress: 100 });
+      if (agent) {
+        const saveMsg = savedTo && savedPath
+          ? `\n✅ ${agent.name}が作業を完了しました → ${savedTo}:${savedPath}`
+          : `\n✅ ${agent.name}が作業を完了しました。FB待ち状態です。`;
+        sendSSE({ type: 'token', content: saveMsg });
+      }
+    }
+    // savedToとsavedPathがある場合はアクティビティログに記録
+    if (savedTo && savedPath && agent) {
+      logActivity({
+        agentId,
+        agentName: agent.name,
+        taskId: completedTaskId || null,
+        action: 'create',
+        destination: savedTo,
+        destinationPath: savedPath,
+        summary: completedSummary || `${agent.name}が作業完了・保存`,
+      });
     }
   }
 
-  // PR_REQUEST ブロック処理
-  const prReqRe = /###PR_REQUEST\s+owner="([^"]+)"\s+repo="([^"]+)"\s+title="([^"]+)"\s+body="([^"]*?)"\s+head="([^"]+)"\s+base="([^"]+)"###/g;
+  // PR_REQUEST ブロック処理 → PR作成後に "review"（FB待ち）に遷移
+  // agentIdオプション付き構文: ###PR_REQUEST agentId="..." owner="..." ...###
+  const prReqRe = /###PR_REQUEST(?:\s+agentId="([^"]*)")?(?:\s+owner="([^"]+)")?\s+(?:owner="([^"]+)"\s+)?repo="([^"]+)"\s+title="([^"]+)"\s+body="([^"]*?)"\s+head="([^"]+)"\s+base="([^"]+)"###/g;
   while ((m = prReqRe.exec(fullResponse)) !== null) {
-    const [, owner, repo, title, body, head, base] = m;
+    const prAgentId = m[1] || null;
+    const owner = m[2] || m[3];
+    const [, , , , repo, title, prBody, head, base] = m;
+    if (!owner || !repo) continue;
     const permission = getRepoPermission(owner, repo);
     if (permission === 'pr') {
       const token = getGithubToken('personal');
       if (token) {
-        const prResult = await createPullRequest(owner, repo, title, body, head, base, token, permission);
+        const prResult = await createPullRequest(owner, repo, title, prBody, head, base, token, permission);
         if (prResult.success) {
+          const prUrl = prResult.data.html_url || '';
           sendSSE({ type: 'pr_created', owner, repo, pullNumber: prResult.data.number, title });
+          if (prAgentId) {
+            const prAgent = agents.find((a) => a.id === prAgentId);
+            const prRes = reg.updateAgentById(prAgentId, { status: 'review', lastActiveAt: new Date().toISOString() });
+            if (prRes) {
+              broadcastToCompany(prRes.companyId, { type: 'agent_status', agentId: prAgentId, status: 'review' });
+              if (prAgent) {
+                sendSSE({ type: 'token', content: `\n✅ ${prAgent.name}がPRを作成しました。確認・FBをお願いします。\n→ ${owner}/${repo}#${prResult.data.number}` });
+                logActivity({
+                  agentId: prAgentId,
+                  agentName: prAgent.name,
+                  action: 'pr',
+                  destination: 'github',
+                  destinationName: `${owner}/${repo}`,
+                  destinationPath: `pull/${prResult.data.number}`,
+                  destinationUrl: prUrl,
+                  summary: `PR作成: ${title}`,
+                });
+              }
+            }
+          }
         }
       }
     }
   }
 
-  // PR_MERGE ブロック処理
-  const prMergeRe = /###PR_MERGE\s+owner="([^"]+)"\s+repo="([^"]+)"\s+pullNumber="(\d+)"###/g;
-  while ((m = prMergeRe.exec(fullResponse)) !== null) {
-    const [, owner, repo, pullNumber] = m;
-    const permission = getRepoPermission(owner, repo);
-    if (permission === 'pr') {
-      const token = getGithubToken('personal');
-      if (token) await mergePullRequest(owner, repo, pullNumber, token, permission);
+  // IDLE ブロック処理 → 明示的に "idle"（待機中）に遷移
+  // 使用例: ###IDLE agentId="..."###
+  const idleRe = /###IDLE\s+agentId="([^"]+)"###/g;
+  while ((m = idleRe.exec(fullResponse)) !== null) {
+    const [, agentId] = m;
+    const agent = agents.find((a) => a.id === agentId);
+    const result = reg.updateAgentById(agentId, {
+      status: 'idle', progress: 0, currentTask: '', estimatedMinutes: null, lastActiveAt: new Date().toISOString(),
+    });
+    if (result) {
+      broadcastToCompany(result.companyId, { type: 'agent_status', agentId, status: 'idle', progress: 0, currentTask: '' });
+      if (agent) {
+        sendSSE({ type: 'token', content: `\n${agent.name}が待機状態に戻りました。` });
+      }
     }
   }
+
+  // WAITING ブロック処理 → "waiting"（承認待ち）に遷移
+  // 使用例: ###WAITING agentId="..." reason="..."###
+  const waitingRe = /###WAITING\s+agentId="([^"]+)"(?:\s+reason="([^"]*)")?###/g;
+  while ((m = waitingRe.exec(fullResponse)) !== null) {
+    const [, agentId, reason = ''] = m;
+    const agent = agents.find((a) => a.id === agentId);
+    const result = reg.updateAgentById(agentId, { status: 'waiting', lastActiveAt: new Date().toISOString() });
+    if (result) {
+      broadcastToCompany(result.companyId, { type: 'agent_status', agentId, status: 'waiting' });
+      if (agent) {
+        const msg = reason
+          ? `\n${agent.name}が承認待ち状態です。理由：${reason}`
+          : `\n${agent.name}が承認待ち状態です。判断をお願いします。`;
+        sendSSE({ type: 'token', content: msg });
+      }
+    }
+  }
+
+  // PR_MERGE ブロック処理 → 事前確認必須
+  const prMergeRe = /###PR_MERGE\s+owner="([^"]+)"\s+repo="([^"]+)"\s+pullNumber="(\d+)"(?:\s+agentId="([^"]*)")?(?:\s+taskId="([^"]*)")?###/g;
+  while ((m = prMergeRe.exec(fullResponse)) !== null) {
+    const [, owner, repo, pullNumber, mergeAgentId, mergeTaskId] = m;
+    const mergeAgent = mergeAgentId ? agents.find((a) => a.id === mergeAgentId) : null;
+    const pendingId = 'pend-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    pendingActions.set(pendingId, {
+      type: 'PR_MERGE', owner, repo, pullNumber,
+      agentId: mergeAgentId, taskId: mergeTaskId,
+    });
+    sendSSE({
+      type: 'confirm_required',
+      pendingId,
+      agentId: mergeAgentId,
+      agentName: mergeAgent?.name || null,
+      action: 'merge',
+      destinationName: `${owner}/${repo}`,
+      destinationPath: `pull/${pullNumber}`,
+      summary: `PRマージ: ${owner}/${repo}#${pullNumber}`,
+    });
+  }
+
+  // FILE_UPDATE ブロック処理 → 事前確認必須
+  const fileUpdateRe = /###FILE_UPDATE\s+owner="([^"]+)"\s+repo="([^"]+)"\s+path="([^"]+)"\s+content="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
+  while ((m = fileUpdateRe.exec(fullResponse)) !== null) {
+    const [, owner, repo, filePath, content, fuAgentId, fuTaskId, summary] = m;
+    const fuAgent = agents.find((a) => a.id === fuAgentId);
+    const pendingId = 'pend-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    pendingActions.set(pendingId, {
+      type: 'FILE_UPDATE', owner, repo, path: filePath, content,
+      agentId: fuAgentId, taskId: fuTaskId, summary,
+    });
+    sendSSE({
+      type: 'confirm_required',
+      pendingId,
+      agentId: fuAgentId,
+      agentName: fuAgent?.name || null,
+      action: 'update',
+      destinationName: `${owner}/${repo}`,
+      destinationPath: filePath,
+      summary,
+    });
+  }
+
+  // NOTION_UPDATE ブロック処理 → 事前確認必須
+  const notionUpdateRe = /###NOTION_UPDATE\s+pageId="([^"]+)"\s+properties="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
+  while ((m = notionUpdateRe.exec(fullResponse)) !== null) {
+    const [, pageId, properties, nuAgentId, nuTaskId, summary] = m;
+    const nuAgent = agents.find((a) => a.id === nuAgentId);
+    const pendingId = 'pend-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    pendingActions.set(pendingId, {
+      type: 'NOTION_UPDATE', pageId, properties,
+      agentId: nuAgentId, taskId: nuTaskId, summary,
+    });
+    sendSSE({
+      type: 'confirm_required',
+      pendingId,
+      agentId: nuAgentId,
+      agentName: nuAgent?.name || null,
+      action: 'notion_update',
+      destinationName: 'Notion',
+      destinationPath: pageId,
+      summary,
+    });
+  }
+
+  // SHEETS_UPDATE ブロック処理 → 事前確認必須
+  const sheetsUpdateRe = /###SHEETS_UPDATE\s+spreadsheetId="([^"]+)"\s+range="([^"]+)"\s+values="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
+  while ((m = sheetsUpdateRe.exec(fullResponse)) !== null) {
+    const [, spreadsheetId, range, values, suAgentId, suTaskId, summary] = m;
+    const suAgent = agents.find((a) => a.id === suAgentId);
+    const pendingId = 'pend-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    pendingActions.set(pendingId, {
+      type: 'SHEETS_UPDATE', spreadsheetId, range, values,
+      agentId: suAgentId, taskId: suTaskId, summary,
+    });
+    sendSSE({
+      type: 'confirm_required',
+      pendingId,
+      agentId: suAgentId,
+      agentName: suAgent?.name || null,
+      action: 'sheets_update',
+      destinationName: 'Google Sheets',
+      destinationPath: `${spreadsheetId}!${range}`,
+      summary,
+    });
+  }
+
+  // WORKSPACE_SAVE ブロック処理 → 即実行（確認不要）
+  // 構文: ###WORKSPACE_SAVE agentId="..." taskId="..." content="..." path="..." summary="説明"###
+  const wsSaveRe = /###WORKSPACE_SAVE\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+content="([^"]*?)"\s+path="([^"]+)"\s+summary="([^"]*)"###/g;
+  while ((m = wsSaveRe.exec(fullResponse)) !== null) {
+    const [, wsAgentId, wsTaskId, wsContent, wsPath, wsSummary] = m;
+    const wsAgent = agents.find((a) => a.id === wsAgentId);
+    const wsBase = path.join(require('os').homedir(), '.onecompanyops-workspace');
+    const wsFilePath = path.join(wsBase, wsPath.replace(/^\//, ''));
+    try {
+      require('fs').mkdirSync(path.dirname(wsFilePath), { recursive: true });
+      require('fs').writeFileSync(wsFilePath, wsContent, 'utf8');
+      // git commit & push
+      try {
+        execSync('git add . && git commit -m "' + wsSummary.replace(/"/g, '\\"') + '" && git push', {
+          cwd: wsBase, stdio: 'pipe',
+        });
+      } catch (gitErr) {
+        console.warn('[workspace-save] git error:', gitErr.message?.slice(0, 100));
+      }
+      logActivity({
+        agentId: wsAgentId,
+        agentName: wsAgent?.name || wsAgentId,
+        taskId: wsTaskId || null,
+        action: 'workspace',
+        destination: 'workspace',
+        destinationPath: wsPath,
+        summary: wsSummary,
+      });
+      sendSSE({ type: 'token', content: `\n✅ ${wsAgent?.name || wsAgentId}: Workspaceに保存 → ${wsPath}` });
+    } catch (e) {
+      sendSSE({ type: 'token', content: `\n⚠️ Workspace保存エラー: ${e.message}` });
+    }
+  }
+
+  // 秘書レスポンスのパターンでタスクwaitingを自動検出
+  const WAITING_PATTERNS = [
+    '確認してください', 'いかがでしょうか', 'よろしいですか',
+    '承認をお願い', 'FBをお願い', 'どうしますか', 'ご判断ください',
+  ];
+  const strippedResponse = fullResponse.replace(/###[^#]*###/g, '');
+  if (WAITING_PATTERNS.some((p) => strippedResponse.includes(p))) {
+    sendSSE({ type: 'task_waiting' });
+  }
+
+  // DIVISION_REPORT ブロック処理
+  const divisionReportRe = /###DIVISION_REPORT\s+divisionHeadId="([^"]+)"\s+summary="([^"]*)"\s+completedTasks="([^"]*)"\s+issues="([^"]*)"###/g;
+  while ((m = divisionReportRe.exec(fullResponse)) !== null) {
+    const [, divisionHeadId, summary, completedTasksStr, issues] = m;
+    const divHeadAgent = agents.find((a) => a.id === divisionHeadId);
+    const divHeadName = divHeadAgent?.displayName || divHeadAgent?.name || divisionHeadId;
+
+    // アクティビティログに記録
+    logActivity({
+      agentId: divisionHeadId,
+      agentName: divHeadName,
+      action: 'division_report',
+      summary: `[事業部長報告] ${summary.slice(0, 80)}`,
+      details: issues ? `issues: ${issues}` : null,
+    });
+
+    // WebSocketブロードキャスト
+    broadcastToCompany(companyId, {
+      type: 'division_report',
+      divisionHeadId,
+      divisionHeadName: divHeadName,
+      summary,
+      completedTasks: completedTasksStr,
+      issues,
+    });
+
+    // issues がある場合のみYutaへのSSEに含める
+    if (issues && issues.trim()) {
+      sendSSE({
+        type: 'token',
+        content: `\n⚠️ **${divHeadName}からブロッカー報告**: ${issues}`,
+      });
+    }
+    // issues なし → バックグラウンドログのみ（Yutaへの通知不要）
+  }
+
+  // 繰り返しパターン検出 → Skills自動生成トリガー
+  // 非同期で実行（レスポンスをブロックしない）
+  setImmediate(() => {
+    try {
+      const actLog = getActivityLog({ limit: 200 });
+      for (const agent of agents) {
+        const patterns = detectRepetitivePatterns(agent.id, actLog);
+        if (patterns.length > 0) {
+          const skillsDir = path.join(__dirname, 'core', 'skills');
+          const s = readAppSettings();
+          const apiKeys = { anthropicApiKey: s.anthropicApiKey };
+          for (const pattern of patterns) {
+            const skillFileName = `auto-${agent.id.slice(-6)}-${Date.now()}.md`;
+            const skillPath = path.join(skillsDir, 'auto-generated', skillFileName);
+            // 既に同じパターンでSkillsが存在する場合はスキップ（重複生成防止）
+            const autoDir = path.join(skillsDir, 'auto-generated');
+            if (fs.existsSync(autoDir)) {
+              const existing = fs.readdirSync(autoDir).find((f) => f.includes(agent.id.slice(-6)));
+              if (existing) continue;
+            }
+            generateSkillFromPattern(pattern, agent.displayName || agent.name, skillPath, apiKeys)
+              .then((result) => {
+                if (result.success) {
+                  console.log(`[skills-auto] Generated: ${skillPath}`);
+                  broadcastToCompany(companyId, {
+                    type: 'skill_generated',
+                    agentId: agent.id,
+                    agentName: agent.displayName || agent.name,
+                    skillPath,
+                    pattern,
+                  });
+                }
+              })
+              .catch((e) => console.error('[skills-auto] error:', e.message));
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[skills-auto] pattern check error:', e.message);
+    }
+  });
 
   // 秘書メッセージを会話履歴に保存
   reg.appendConversation(companyId, {
@@ -1482,6 +2063,336 @@ app.post('/api/secretary/message', async (req, res) => {
 app.get('/api/secretary/history', (req, res) => {
   const companyId = req.query.companyId || reg.primaryCompanyId();
   res.json({ messages: reg.loadConversation(companyId) });
+});
+
+// ── タスクタイトル自動生成 ──────────────────────────────────────────────────
+app.post('/api/task/generate-title', async (req, res) => {
+  const { message, text } = req.body || {};
+  const messageText = text || message;
+  if (!messageText) return res.status(400).json({ error: 'message is required' });
+  const s = readAppSettings();
+  const apiKey = s.anthropicApiKey || '';
+  if (!apiKey.trim()) return res.json({ title: messageText.slice(0, 10) });
+  try {
+    let title = '';
+    await streamAnthropic({
+      apiKey,
+      model: 'claude-haiku-4-5-20251001',
+      system: '与えられたメッセージから10文字以内の日本語タイトルを生成してください。記号・句読点不要。タイトルのみを返してください。',
+      messages: [{ role: 'user', content: `メッセージ：${String(messageText).slice(0, 200)}` }],
+      onText: (chunk) => { title += chunk; },
+    });
+    res.json({ title: title.trim().slice(0, 12) || messageText.slice(0, 10) });
+  } catch {
+    res.json({ title: messageText.slice(0, 10) });
+  }
+});
+
+// ── Skills生成API ─────────────────────────────────────────────────────────────
+
+app.post('/api/skills/generate', async (req, res) => {
+  const { pattern, agentName, skillName, targetDir } = req.body || {};
+  if (!pattern || !agentName) return res.status(400).json({ error: 'pattern, agentName は必須です' });
+
+  const skillsDir = path.join(__dirname, 'core', 'skills');
+  const subDir = targetDir ? path.join(skillsDir, targetDir) : path.join(skillsDir, 'auto-generated');
+  const fileName = (skillName || `${agentName}-${Date.now()}`).replace(/[^a-zA-Z0-9\-_\u3040-\u30FF\u4E00-\u9FFF]/g, '-') + '.md';
+  const targetPath = path.join(subDir, fileName);
+
+  const s = readAppSettings();
+  const apiKeys = { anthropicApiKey: s.anthropicApiKey };
+
+  const result = await generateSkillFromPattern(pattern, agentName, targetPath, apiKeys);
+  if (!result.success) return res.status(500).json({ error: result.error });
+
+  logActivity({
+    agentName,
+    action: 'create',
+    destination: 'workspace',
+    destinationPath: targetPath.replace(__dirname, ''),
+    summary: `Skillsファイル自動生成: ${fileName}`,
+  });
+
+  res.json({ success: true, path: targetPath.replace(__dirname, ''), content: result.content });
+});
+
+app.get('/api/skills/report', async (req, res) => {
+  const skillsDir = path.join(__dirname, 'core', 'skills');
+  const result = await collectDailySkillsReport(skillsDir);
+  if (!result) return res.json({ success: true, report: null, newSkills: [], message: '本日新規作成されたSkillsはありません' });
+  res.json(result);
+});
+
+// ── Integration helpers ──────────────────────────────────────────────────────
+
+function getNotionToken(accountId) {
+  const s = readAppSettings();
+  const accounts = s.integrations?.notion;
+  if (!Array.isArray(accounts) || accounts.length === 0) return null;
+  if (accountId) { const a = accounts.find((x) => x.id === accountId); return a?.token || null; }
+  return accounts[0]?.token || null;
+}
+
+function getSheetsCredentials(accountId) {
+  const s = readAppSettings();
+  const accounts = s.integrations?.googleSheets;
+  if (!Array.isArray(accounts) || accounts.length === 0) return null;
+  if (accountId) { const a = accounts.find((x) => x.id === accountId); return a?.credentials || null; }
+  return accounts[0]?.credentials || null;
+}
+
+function getGA4Config(accountId) {
+  const s = readAppSettings();
+  const accounts = s.integrations?.googleAnalytics;
+  if (!Array.isArray(accounts) || accounts.length === 0) return null;
+  if (accountId) return accounts.find((x) => x.id === accountId) || null;
+  return accounts[0] || null;
+}
+
+// ── Notion endpoints ──
+
+app.get('/api/integrations/notion/test', async (req, res) => {
+  const token = req.headers['x-notion-token'] || getNotionToken(req.query.accountId);
+  if (!token) return res.json({ ok: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.testConnection(token));
+});
+
+app.get('/api/integrations/notion/databases', async (req, res) => {
+  const token = getNotionToken(req.query.accountId);
+  if (!token) return res.json({ success: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.listDatabases(token));
+});
+
+app.post('/api/integrations/notion/query', async (req, res) => {
+  const token = getNotionToken(req.body.notionAccountId);
+  if (!token) return res.json({ success: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.queryDatabase(token, req.body.databaseId, req.body.filter, req.body.sorts));
+});
+
+app.post('/api/integrations/notion/pages', async (req, res) => {
+  const token = getNotionToken(req.body.notionAccountId);
+  if (!token) return res.json({ success: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.createPage(token, req.body.databaseId, req.body.properties));
+});
+
+app.put('/api/integrations/notion/pages/:pageId', async (req, res) => {
+  const token = getNotionToken(req.body.notionAccountId);
+  if (!token) return res.json({ success: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.updatePage(token, req.params.pageId, req.body.properties));
+});
+
+app.get('/api/integrations/notion/pages/:pageId', async (req, res) => {
+  const token = getNotionToken(req.query.accountId);
+  if (!token) return res.json({ success: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.getPage(token, req.params.pageId));
+});
+
+app.get('/api/integrations/notion/search', async (req, res) => {
+  const token = getNotionToken(req.query.accountId);
+  if (!token) return res.json({ success: false, error: 'Notion tokenが未設定です' });
+  res.json(await notion.searchPages(token, req.query.q));
+});
+
+// ── Google Sheets endpoints ──
+
+app.get('/api/integrations/sheets/test', async (req, res) => {
+  const creds = getSheetsCredentials(req.query.accountId);
+  if (!creds) return res.json({ ok: false, error: 'Sheets認証情報が未設定です' });
+  res.json(await sheets.testConnection(creds));
+});
+
+app.get('/api/integrations/sheets/:spreadsheetId/sheets', async (req, res) => {
+  const creds = getSheetsCredentials(req.query.accountId);
+  if (!creds) return res.json({ success: false, error: 'Sheets認証情報が未設定です' });
+  res.json(await sheets.listSheets(creds, req.params.spreadsheetId));
+});
+
+app.post('/api/integrations/sheets/read', async (req, res) => {
+  const creds = getSheetsCredentials(req.body.accountId);
+  if (!creds) return res.json({ success: false, error: 'Sheets認証情報が未設定です' });
+  res.json(await sheets.readRange(creds, req.body.spreadsheetId, req.body.range));
+});
+
+app.post('/api/integrations/sheets/write', async (req, res) => {
+  const creds = getSheetsCredentials(req.body.accountId);
+  if (!creds) return res.json({ success: false, error: 'Sheets認証情報が未設定です' });
+  // 破壊的操作: confirm_required
+  const pendingId = 'pend-sheets-' + Date.now();
+  pendingActions.set(pendingId, {
+    type: 'SHEETS_WRITE',
+    credentials: creds,
+    spreadsheetId: req.body.spreadsheetId,
+    range: req.body.range,
+    values: req.body.values,
+  });
+  res.json({ confirm_required: true, pendingId, summary: `Sheets上書き: ${req.body.range}` });
+});
+
+app.post('/api/integrations/sheets/append', async (req, res) => {
+  const creds = getSheetsCredentials(req.body.accountId);
+  if (!creds) return res.json({ success: false, error: 'Sheets認証情報が未設定です' });
+  res.json(await sheets.appendRows(creds, req.body.spreadsheetId, req.body.range, req.body.values));
+});
+
+// ── GA4 endpoints ──
+
+app.get('/api/integrations/ga4/test', async (req, res) => {
+  const config = getGA4Config(req.query.accountId);
+  if (!config?.credentials || !config?.propertyId) return res.json({ ok: false, error: 'GA4設定が未設定です' });
+  res.json(await ga4.testConnection(config.credentials, config.propertyId));
+});
+
+app.post('/api/integrations/ga4/report', async (req, res) => {
+  const config = getGA4Config(req.body.accountId);
+  if (!config?.credentials || !config?.propertyId) return res.json({ success: false, error: 'GA4設定が未設定です' });
+  res.json(await ga4.runReport(config.credentials, config.propertyId, {
+    dateRange: req.body.dateRange,
+    metrics: req.body.metrics,
+    dimensions: req.body.dimensions,
+  }));
+});
+
+app.get('/api/integrations/ga4/realtime', async (req, res) => {
+  const config = getGA4Config(req.query.accountId);
+  if (!config?.credentials || !config?.propertyId) return res.json({ success: false, error: 'GA4設定が未設定です' });
+  res.json(await ga4.getRealtimeData(config.credentials, config.propertyId));
+});
+
+// ── アクティビティログ ──────────────────────────────────────────────────────
+
+app.get('/api/activity-log', (req, res) => {
+  const { agentId, sectionName, taskId, destination, dateFrom, dateTo, limit } = req.query;
+  const logs = getActivityLog({
+    agentId, sectionName, taskId, destination, dateFrom, dateTo,
+    limit: limit ? parseInt(limit, 10) : 100,
+  });
+  res.json({ logs });
+});
+
+// ── 確認待ち操作の承認・却下 ─────────────────────────────────────────────────
+
+app.post('/api/action/confirm', async (req, res) => {
+  const { pendingId, approved } = req.body || {};
+  if (!pendingId) return res.status(400).json({ error: 'pendingId is required' });
+
+  const pending = pendingActions.get(pendingId);
+  if (!pending) return res.status(404).json({ error: 'pending action not found or already processed' });
+
+  pendingActions.delete(pendingId);
+  const agent = pending.agentId ? reg.findAgentById(pending.agentId)?.agent : null;
+
+  if (!approved) {
+    // 却下
+    const cid = agent ? reg.findAgentById(pending.agentId)?.companyId : null;
+    if (cid) {
+      wss.clients.forEach((c) => {
+        if (c.readyState === 1) c.send(JSON.stringify({
+          type: 'action_cancelled', pendingId,
+          agentId: pending.agentId, summary: pending.summary,
+        }));
+      });
+    }
+    return res.json({ ok: true, status: 'cancelled' });
+  }
+
+  // 承認 → 操作を実行
+  try {
+    let resultMsg = '';
+
+    if (pending.type === 'PR_MERGE') {
+      const { owner, repo, pullNumber } = pending;
+      const permission = getRepoPermission(owner, repo);
+      if (permission === 'pr') {
+        const token = getGithubToken('personal');
+        if (token) {
+          await mergePullRequest(owner, repo, pullNumber, token, permission);
+          logActivity({
+            agentId: pending.agentId,
+            agentName: agent?.name || null,
+            taskId: pending.taskId,
+            action: 'merge',
+            destination: 'github',
+            destinationName: `${owner}/${repo}`,
+            destinationPath: `pull/${pullNumber}`,
+            summary: `PRマージ: ${owner}/${repo}#${pullNumber}`,
+          });
+          resultMsg = `✅ PRをマージしました: ${owner}/${repo}#${pullNumber}`;
+        }
+      }
+
+    } else if (pending.type === 'FILE_UPDATE') {
+      const { owner, repo, path: filePath, content } = pending;
+      const permission = getRepoPermission(owner, repo);
+      const token = getGithubToken(permission === 'pr' ? 'personal' : 'company');
+      if (token) {
+        await updateFileContent(owner, repo, filePath, content, pending.summary, null, token);
+        logActivity({
+          agentId: pending.agentId,
+          agentName: agent?.name || null,
+          taskId: pending.taskId,
+          action: 'update',
+          destination: 'github',
+          destinationName: `${owner}/${repo}`,
+          destinationPath: filePath,
+          summary: pending.summary,
+        });
+        resultMsg = `✅ ファイルを更新しました: ${owner}/${repo}/${filePath}`;
+      }
+
+    } else if (pending.type === 'NOTION_UPDATE') {
+      // Notion更新（APIキーが必要）
+      const settings = (() => {
+        try { return JSON.parse(require('fs').readFileSync(path.join(DATA_DIR, 'app-settings.json'), 'utf8')); } catch { return {}; }
+      })();
+      const notionAccounts = Array.isArray(settings.integrations?.notion) ? settings.integrations.notion : [];
+      const notionToken = notionAccounts[0]?.token;
+      if (notionToken && notionToken !== '****') {
+        await fetch(`https://api.notion.com/v1/pages/${pending.pageId}`, {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${notionToken}`, 'Content-Type': 'application/json', 'Notion-Version': '2022-06-28' },
+          body: JSON.stringify({ properties: JSON.parse(pending.properties || '{}') }),
+        });
+        logActivity({
+          agentId: pending.agentId,
+          agentName: agent?.name || null,
+          taskId: pending.taskId,
+          action: 'notion_update',
+          destination: 'notion',
+          destinationPath: pending.pageId,
+          summary: pending.summary,
+        });
+        resultMsg = `✅ Notionを更新しました: ${pending.pageId}`;
+      }
+
+    } else if (pending.type === 'SHEETS_UPDATE') {
+      logActivity({
+        agentId: pending.agentId,
+        agentName: agent?.name || null,
+        taskId: pending.taskId,
+        action: 'sheets_update',
+        destination: 'sheets',
+        destinationPath: `${pending.spreadsheetId}!${pending.range}`,
+        summary: pending.summary,
+      });
+      resultMsg = `✅ スプシ更新をログに記録しました（API未実装）: ${pending.spreadsheetId}`;
+    }
+
+    // 完了通知をWS broadcast
+    const cid = pending.agentId ? reg.findAgentById(pending.agentId)?.companyId : null;
+    if (cid) {
+      wss.clients.forEach((c) => {
+        if (c.readyState === 1) c.send(JSON.stringify({
+          type: 'action_completed', pendingId,
+          agentId: pending.agentId, summary: resultMsg || pending.summary,
+        }));
+      });
+    }
+
+    res.json({ ok: true, status: 'executed', message: resultMsg });
+  } catch (e) {
+    console.error('[action/confirm] error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── GitHub PR merge / list / get ────────────────────────────────────────────
@@ -1790,165 +2701,541 @@ async function mainCli() {
   }
 }
 
-// ── アクティビティログ ──────────────────────────────────────────────────────
-const MAX_LOG_ENTRIES = 1000;
+// ── 起動時ステータス自動修正 ─────────────────────────────────────────────────
+function autoFixAgentStatuses() {
+  const now = Date.now();
+  const companies = reg.listMeta();
+  let fixed = 0;
 
-function getLogFilePath() {
-  const wsDir = path.join(os.homedir(), '.onecompanyops-workspace', '.onecompanyops');
-  if (fs.existsSync(path.join(os.homedir(), '.onecompanyops-workspace'))) {
-    try { fs.mkdirSync(wsDir, { recursive: true }); return path.join(wsDir, 'activity-log.json'); } catch {}
-  }
-  return path.join(os.homedir(), '.onecompanyops-activity-log.json');
-}
+  for (const company of companies) {
+    const agents = reg.loadAgents(company.id);
+    let changed = false;
 
-function readActivityLog() {
-  const f = getLogFilePath();
-  if (!fs.existsSync(f)) return [];
-  try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return []; }
-}
+    for (const agent of agents) {
+      const lastActive = agent.lastActiveAt ? new Date(agent.lastActiveAt).getTime() : null;
+      const minutesSince = lastActive ? (now - lastActive) / 60000 : null;
+      let newStatus = null;
+      let clearTask = false;
 
-function writeActivityLog(entries) {
-  const f = getLogFilePath();
-  try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(entries, null, 2), 'utf8'); } catch {}
-}
+      // completedは常にreviewに正規化
+      if (agent.status === 'completed') {
+        newStatus = 'review';
+      }
+      // working かつ currentTask が空 → idle
+      else if (agent.status === 'working' && (!agent.currentTask || agent.currentTask.trim() === '')) {
+        console.log(`[auto-fix] ${agent.name}: working→idle (currentTask空)`);
+        newStatus = 'idle';
+        clearTask = true;
+      }
+      // working かつ lastActiveAt が60分以上前 → review
+      else if (agent.status === 'working' && minutesSince !== null && minutesSince > 60) {
+        console.log(`[auto-fix] ${agent.name}: working→review (${Math.floor(minutesSince)}分更新なし)`);
+        newStatus = 'review';
+      }
+      // waiting かつ lastActiveAt が24時間以上前 → review
+      else if (agent.status === 'waiting' && minutesSince !== null && minutesSince > 1440) {
+        console.log(`[auto-fix] ${agent.name}: waiting→review (${Math.floor(minutesSince / 60)}時間更新なし)`);
+        newStatus = 'review';
+      }
+      // progress=100 かつ working → review
+      else if (agent.status === 'working' && agent.progress >= 100) {
+        console.log(`[auto-fix] ${agent.name}: working→review (progress=100)`);
+        newStatus = 'review';
+      }
 
-function logActivity(entry) {
-  const log = readActivityLog();
-  const record = {
-    id: 'act-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    timestamp: new Date().toISOString(),
-    ...entry,
-  };
-  log.push(record);
-  if (log.length > MAX_LOG_ENTRIES) log.splice(0, log.length - MAX_LOG_ENTRIES);
-  writeActivityLog(log);
-  return record;
-}
-
-app.get('/api/activity-log', (req, res) => {
-  const { agentId, sectionName, taskId, destination, dateFrom, dateTo, limit } = req.query;
-  let log = readActivityLog();
-  if (agentId) log = log.filter((e) => e.agentId === agentId);
-  if (sectionName) log = log.filter((e) => e.sectionName === sectionName);
-  if (taskId) log = log.filter((e) => e.taskId === taskId);
-  if (destination) log = log.filter((e) => e.destination === destination);
-  if (dateFrom) { const from = new Date(dateFrom).getTime(); log = log.filter((e) => new Date(e.timestamp).getTime() >= from); }
-  if (dateTo) { const to = new Date(dateTo).getTime(); log = log.filter((e) => new Date(e.timestamp).getTime() <= to); }
-  const lim = limit ? parseInt(limit, 10) : 100;
-  res.json({ logs: log.slice(-lim).reverse() });
-});
-
-// ── 確認待ちアクション ────────────────────────────────────────────────────
-const pendingActions = new Map();
-
-app.post('/api/action/confirm', async (req, res) => {
-  const { pendingId, approved } = req.body || {};
-  if (!pendingId) return res.status(400).json({ error: 'pendingId is required' });
-  const pending = pendingActions.get(pendingId);
-  if (!pending) return res.status(404).json({ error: 'pending action not found or already processed' });
-  pendingActions.delete(pendingId);
-  if (!approved) return res.json({ ok: true, status: 'rejected' });
-  try {
-    let resultMsg = '実行しました';
-    if (pending.type === 'PR_MERGE') {
-      const token = getGithubToken?.('personal') || null;
-      if (token) {
-        await mergePullRequest(pending.owner, pending.repo, Number(pending.pullNumber), token);
-        resultMsg = `PRをマージしました: ${pending.owner}/${pending.repo}#${pending.pullNumber}`;
+      if (newStatus) {
+        agent.status = newStatus;
+        if (clearTask) {
+          agent.progress = 0;
+          agent.currentTask = '';
+        }
+        changed = true;
+        fixed++;
+        // WebSocketでクライアントに通知
+        broadcastToCompany(company.id, {
+          type: 'agent_status',
+          agentId: agent.id,
+          status: newStatus,
+          progress: clearTask ? 0 : agent.progress,
+          currentTask: clearTask ? '' : agent.currentTask,
+        });
       }
     }
-    res.json({ ok: true, status: 'executed', message: resultMsg });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    if (changed) {
+      reg.saveAgents(company.id, agents);
+    }
   }
-});
 
-// ── セクション管理（インメモリ） ────────────────────────────────────────────
-let FIXED_SECTIONS = [
-  { id: 'president', name: '社長室' },
-  { id: 'backstage', name: 'BACKSTAGE事業部' },
-  { id: 'personal', name: '個人事業部' },
-  { id: 'music', name: '音楽事業部' },
-  { id: 'freelance', name: '業務委託事業部' },
-  { id: 'general', name: '統括' },
-];
+  if (fixed > 0) {
+    console.log(`[auto-fix] ${fixed}件のエージェントステータスを修正しました`);
+  }
+}
 
-app.get('/api/sections', (req, res) => res.json(FIXED_SECTIONS));
+// ── /api/agents/:id/status の厳密化 ─────────────────────────────────────────
+// (既存エンドポイントに上書き)
+app.put('/api/agents/:id/status', (req, res) => {
+  const { status, progress, estimatedMinutes, currentTask, lastMessage } = req.body || {};
 
-app.post('/api/sections', (req, res) => {
-  const { name } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  const section = { id: 'sec-' + Date.now(), name };
-  FIXED_SECTIONS.push(section);
-  res.json(section);
-});
+  // workingへの変更にはcurrentTaskが必須
+  if (status === 'working' && !currentTask) {
+    return res.status(400).json({ error: 'working状態への変更にはcurrentTaskが必要です' });
+  }
 
-app.put('/api/sections/:id', (req, res) => {
-  const { name } = req.body || {};
-  const idx = FIXED_SECTIONS.findIndex((s) => s.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'not found' });
-  FIXED_SECTIONS[idx] = { ...FIXED_SECTIONS[idx], name };
-  res.json(FIXED_SECTIONS[idx]);
-});
+  // progressは0〜100の整数のみ
+  if (progress !== undefined) {
+    const p = parseInt(progress, 10);
+    if (isNaN(p) || p < 0 || p > 100) {
+      return res.status(400).json({ error: 'progressは0〜100の整数である必要があります' });
+    }
+  }
 
-app.delete('/api/sections/:id', (req, res) => {
-  FIXED_SECTIONS = FIXED_SECTIONS.filter((s) => s.id !== req.params.id);
-  res.json({ ok: true });
-});
+  // estimatedMinutesが常に同じ固定値の場合は警告
+  if (estimatedMinutes !== undefined && estimatedMinutes !== null) {
+    const found = reg.findAgentById(req.params.id);
+    if (found && found.agent.estimatedMinutes === estimatedMinutes) {
+      console.warn(`[warn] ${found.agent.name}: estimatedMinutes="${estimatedMinutes}"が前回と同じ値です（固定値を疑ってください）`);
+    }
+  }
 
-// ── Workspace API ────────────────────────────────────────────────────────
-app.post('/api/workspace/init', async (req, res) => {
-  const { owner, repo, tokenType } = req.body || {};
-  if (!owner || !repo) return res.status(400).json({ error: 'owner and repo are required' });
+  const patch = { lastActiveAt: new Date().toISOString() };
+  if (status !== undefined) patch.status = status;
+  if (progress !== undefined) patch.progress = parseInt(progress, 10);
+  if (estimatedMinutes !== undefined) patch.estimatedMinutes = estimatedMinutes == null ? null : Number(estimatedMinutes);
+  if (currentTask !== undefined) patch.currentTask = currentTask;
+  if (lastMessage !== undefined) patch.lastMessage = lastMessage;
+
+  const result = reg.updateAgentById(req.params.id, patch);
+  if (!result) return res.status(404).json({ error: 'not found' });
+
+  broadcastToCompany(result.companyId, {
+    type: 'agent_status',
+    agentId: result.agent.id,
+    status: result.agent.status,
+    progress: result.agent.progress,
+    estimatedMinutes: result.agent.estimatedMinutes,
+    currentTask: result.agent.currentTask,
+    lastMessage: result.agent.lastMessage,
+    lastActiveAt: result.agent.lastActiveAt,
+  });
+
+  // タスクステータスとエージェントステータスの連動
   try {
-    const { initWorkspace } = require('./lib/workspace-sync');
-    const s = readAppSettings ? readAppSettings() : {};
-    const token = (s.githubTokens || []).find((t) => t.type === (tokenType || 'personal'))?.value || '';
-    const result = await initWorkspace(owner, repo, token);
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+    const tasks = loadTasksFile();
+    const agentId = result.agent.id;
+    let tasksChanged = false;
+    for (const task of tasks) {
+      const involved = (task.activeAgents || []).includes(agentId)
+        || (task.messages || []).some((m) => m.agentId === agentId);
+      if (!involved) continue;
 
-app.get('/api/workspace/path', (req, res) => {
-  const wsPath = path.join(os.homedir(), '.onecompanyops-workspace');
-  res.json({ path: wsPath, exists: fs.existsSync(wsPath) });
-});
+      let newTaskStatus = null;
+      if (result.agent.status === 'working') {
+        if (task.status !== 'working') newTaskStatus = 'working';
+      } else if (result.agent.status === 'review' || result.agent.status === 'waiting') {
+        newTaskStatus = result.agent.status;
+      } else if (result.agent.status === 'idle') {
+        // 他にworkingのエージェントがいなければdone
+        const allAgents = reg.loadAgents(result.companyId);
+        const otherWorking = (task.activeAgents || []).some((aid) => {
+          if (aid === agentId) return false;
+          const a = allAgents.find((x) => x.id === aid);
+          return a && a.status === 'working';
+        });
+        if (!otherWorking) newTaskStatus = 'done';
+      }
 
-// ── Notion 連携テスト ────────────────────────────────────────────────────
-app.post('/api/integrations/notion/test', async (req, res) => {
-  const { apiKey } = req.body || {};
-  if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
-  try {
-    const r = await fetch('https://api.notion.com/v1/users/me', {
-      headers: { Authorization: `Bearer ${apiKey}`, 'Notion-Version': '2022-06-28' },
-    });
-    if (!r.ok) return res.status(400).json({ ok: false, error: `HTTP ${r.status}` });
-    const data = await r.json();
-    res.json({ ok: true, name: data.name || data.id });
+      if (newTaskStatus && task.status !== newTaskStatus) {
+        task.status = newTaskStatus;
+        task.updatedAt = new Date().toISOString();
+        tasksChanged = true;
+        broadcastToCompany(result.companyId, { type: 'task_status_update', taskId: task.id, status: newTaskStatus });
+      }
+    }
+    if (tasksChanged) saveTasksFile(tasks);
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    console.error('[agent-status] task sync error:', e.message);
   }
-});
 
-app.get('/api/integrations/notion/databases', async (req, res) => {
-  const { apiKey } = req.query;
-  if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
-  try {
-    const r = await fetch('https://api.notion.com/v1/search', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filter: { value: 'database', property: 'object' }, page_size: 20 }),
-    });
-    const data = await r.json();
-    res.json({ databases: (data.results || []).map((d) => ({ id: d.id, title: d.title?.[0]?.plain_text || d.id })) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  res.json(result.agent);
+  fireAndForgetWorkspaceSave(result.companyId, 'Update agent status');
 });
 
 startAutoGitSync(() => reg.listMeta(), 30 * 60 * 1000);
+
+// 起動時に一度ステータス修正を実行
+autoFixAgentStatuses();
+
+// ── ルーティンAPI＋エンジン ─────────────────────────────────────────────────
+const ROUTINES_PATH = path.join(__dirname, 'core', 'skills', 'routines.json');
+
+function loadRoutinesFile() {
+  if (!fs.existsSync(ROUTINES_PATH)) return [];
+  try { return JSON.parse(fs.readFileSync(ROUTINES_PATH, 'utf8')).routines || []; } catch { return []; }
+}
+
+function saveRoutinesFile(routines) {
+  fs.mkdirSync(path.dirname(ROUTINES_PATH), { recursive: true });
+  fs.writeFileSync(ROUTINES_PATH, JSON.stringify({ routines }, null, 2), 'utf8');
+}
+
+function calcNextRun(routine) {
+  const now = new Date();
+  if (routine.trigger === 'hourly') {
+    const next = new Date(now);
+    next.setMinutes(0, 0, 0);
+    next.setHours(next.getHours() + 1);
+    return next.toISOString();
+  }
+  if ((routine.trigger === 'daily' || routine.trigger === 'weekly') && routine.triggerTime) {
+    const [h, m] = routine.triggerTime.split(':').map(Number);
+    // JST = UTC+9
+    const nowJST = new Date(now.getTime() + 9 * 3600000);
+    const targetJST = new Date(nowJST);
+    targetJST.setHours(h, m, 0, 0);
+    if (targetJST <= nowJST) targetJST.setDate(targetJST.getDate() + 1);
+    return new Date(targetJST.getTime() - 9 * 3600000).toISOString();
+  }
+  return null;
+}
+
+async function executeRoutine(routine) {
+  const companies = reg.listMeta();
+  if (!companies?.length) return;
+  const companyId = companies[0].id;
+
+  console.log(`[routine] Executing: ${routine.name}`);
+  broadcastToCompany(companyId, { type: 'routine_started', routineId: routine.id, routineName: routine.name });
+
+  for (const task of routine.tasks) {
+    try {
+      await runAutonomousMessage(companyId, task.action || '');
+    } catch (e) {
+      console.error(`[routine] task error: ${e.message}`);
+    }
+  }
+
+  const routines = loadRoutinesFile();
+  const idx = routines.findIndex((r) => r.id === routine.id);
+  if (idx >= 0) {
+    routines[idx].lastRun = new Date().toISOString();
+    routines[idx].nextRun = calcNextRun(routine);
+    saveRoutinesFile(routines);
+  }
+
+  broadcastToCompany(companyId, { type: 'routine_completed', routineId: routine.id });
+  console.log(`[routine] Completed: ${routine.name}`);
+}
+
+app.get('/api/routines', (req, res) => {
+  res.json({ routines: loadRoutinesFile() });
+});
+
+app.post('/api/routines', (req, res) => {
+  const routines = loadRoutinesFile();
+  const newRoutine = {
+    id: 'routine-' + Date.now(),
+    name: req.body.name || '新しいルーティン',
+    trigger: req.body.trigger || 'daily',
+    triggerTime: req.body.triggerTime || '09:00',
+    timezone: req.body.timezone || 'Asia/Tokyo',
+    enabled: req.body.enabled !== false,
+    tasks: req.body.tasks || [],
+    lastRun: null,
+    nextRun: null,
+  };
+  newRoutine.nextRun = calcNextRun(newRoutine);
+  routines.push(newRoutine);
+  saveRoutinesFile(routines);
+  res.json(newRoutine);
+});
+
+app.put('/api/routines/:id', (req, res) => {
+  const routines = loadRoutinesFile();
+  const idx = routines.findIndex((r) => r.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: 'not found' });
+  routines[idx] = { ...routines[idx], ...req.body, id: req.params.id };
+  routines[idx].nextRun = calcNextRun(routines[idx]);
+  saveRoutinesFile(routines);
+  res.json(routines[idx]);
+});
+
+app.delete('/api/routines/:id', (req, res) => {
+  const routines = loadRoutinesFile().filter((r) => r.id !== req.params.id);
+  saveRoutinesFile(routines);
+  res.status(204).end();
+});
+
+app.post('/api/routines/:id/run', async (req, res) => {
+  const routine = loadRoutinesFile().find((r) => r.id === req.params.id);
+  if (!routine) return res.status(404).json({ error: 'not found' });
+  res.json({ status: 'started' });
+  executeRoutine(routine).catch((e) => console.error('[routine] manual run error:', e.message));
+});
+
+// ルーティン二重実行防止用のメモリ管理
+const routineLastRun = new Map();
+
+// ルーティンエンジン（毎分チェック）
+setInterval(() => {
+  const now = new Date();
+  const routines = loadRoutinesFile().filter((r) => r.enabled && r.nextRun);
+  for (const r of routines) {
+    const next = new Date(r.nextRun);
+    if (next <= now) {
+      // 二重実行防止：前回実行からの経過時間をチェック
+      const lastRun = routineLastRun.get(r.id);
+      const minInterval = r.trigger === 'hourly' ? 3600000 : 86400000;
+      if (lastRun && Date.now() - lastRun < minInterval) {
+        continue; // 最小間隔以内に実行済みならスキップ
+      }
+      routineLastRun.set(r.id, Date.now());
+      executeRoutine(r).catch((e) => {
+        console.error('[routine] engine error:', e.message);
+        // エラーでもlastRunを維持してリトライを防ぐ
+      });
+    }
+  }
+}, 60000);
+
+// 起動時にnextRunを初期化
+(function initRoutineNextRun() {
+  const routines = loadRoutinesFile();
+  let changed = false;
+  for (const r of routines) {
+    if (!r.nextRun) { r.nextRun = calcNextRun(r); changed = true; }
+  }
+  if (changed) saveRoutinesFile(routines);
+  const enabled = routines.filter((r) => r.enabled).length;
+  console.log(`[routines] Loaded ${routines.length} routines (${enabled} enabled)`);
+})();
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── タスク永続化 ────────────────────────────────────────────────────────────
+
+function getTasksPath() {
+  return path.join(DATA_DIR, 'tasks.json');
+}
+
+function loadTasksFile() {
+  try {
+    const p = getTasksPath();
+    if (!fs.existsSync(p)) return [];
+    return JSON.parse(fs.readFileSync(p, 'utf-8'));
+  } catch { return []; }
+}
+
+function saveTasksFile(tasks) {
+  fs.writeFileSync(getTasksPath(), JSON.stringify(tasks, null, 2), 'utf-8');
+}
+
+function saveTaskMessage(taskId, message) {
+  try {
+    const tasks = loadTasksFile();
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    if (!task.messages) task.messages = [];
+    task.messages.push(message);
+    task.updatedAt = new Date().toISOString();
+    saveTasksFile(tasks);
+  } catch (e) {
+    console.error('saveTaskMessage error:', e);
+  }
+}
+
+app.get('/api/tasks', (req, res) => {
+  res.json(loadTasksFile());
+});
+
+app.post('/api/tasks', (req, res) => {
+  const tasks = loadTasksFile();
+  const { id, name, status, messages, activeAgents, createdAt, updatedAt } = req.body;
+  if (!id) return res.status(400).json({ error: 'id required' });
+  const idx = tasks.findIndex((t) => t.id === id);
+  const record = { id, name: name || '新しいタスク', status: status || 'pending', messages: messages || [], activeAgents: activeAgents || [], createdAt: createdAt || new Date().toISOString(), updatedAt: updatedAt || new Date().toISOString() };
+  if (idx >= 0) tasks[idx] = record; else tasks.push(record);
+  saveTasksFile(tasks);
+  res.json(record);
+});
+
+app.put('/api/tasks/:id', (req, res) => {
+  const tasks = loadTasksFile();
+  const idx = tasks.findIndex((t) => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  tasks[idx] = { ...tasks[idx], ...req.body, id: req.params.id, updatedAt: new Date().toISOString() };
+  saveTasksFile(tasks);
+  res.json(tasks[idx]);
+});
+
+app.delete('/api/tasks/:id', (req, res) => {
+  const tasks = loadTasksFile();
+  const filtered = tasks.filter((t) => t.id !== req.params.id);
+  saveTasksFile(filtered);
+  res.json({ ok: true });
+});
+
+app.post('/api/tasks/:id/messages', (req, res) => {
+  saveTaskMessage(req.params.id, { ...req.body, timestamp: req.body.timestamp || new Date().toISOString() });
+  res.json({ ok: true });
+});
+
+// ── 自律タイマー（1時間ごと + 毎日9:00 JST） ─────────────────────────────
+const AUTONOMOUS_INTERVAL_MS = 60 * 60 * 1000; // 1時間
+
+async function runAutonomousMessage(companyId, text) {
+  const s = readAppSettings();
+  const apiKey = s.anthropicApiKey || '';
+  if (!apiKey.trim()) return;
+
+  const history = reg.loadConversation(companyId);
+  const model = s.model || 'claude-sonnet-4-20250514';
+  const system = buildSecretarySystemPrompt(companyId);
+  const recentHistory = history.slice(-10);
+  const messages = [
+    ...recentHistory.map((msg) => ({
+      role: msg.role === 'user' ? 'user' : 'assistant',
+      content: msg.content,
+    })),
+    { role: 'user', content: text },
+  ];
+
+  reg.appendConversation(companyId, {
+    id: 'msg-' + Date.now(),
+    role: 'user',
+    agentId: null,
+    content: text,
+    delegations: [],
+    timestamp: new Date().toISOString(),
+  });
+
+  broadcastToCompany(companyId, { type: 'secretary_typing', text });
+
+  let fullResponse = '';
+  try {
+    await streamAnthropic({
+      apiKey, model, system, messages,
+      onText: (chunk) => {
+        fullResponse += chunk;
+        broadcastToCompany(companyId, { type: 'secretary_token', content: chunk });
+      },
+    });
+  } catch (err) {
+    console.error('[autonomous] API error:', err.message);
+    if (err.isCredit) {
+      broadcastToCompany(companyId, { type: 'error', message: 'APIクレジットが不足しています。設定画面でAPIキーを確認してください。' });
+    }
+    return;
+  }
+
+  reg.appendConversation(companyId, {
+    id: 'msg-' + Date.now(),
+    role: 'assistant',
+    agentId: null,
+    content: fullResponse,
+    delegations: [],
+    timestamp: new Date().toISOString(),
+  });
+
+  broadcastToCompany(companyId, { type: 'secretary_done', content: fullResponse });
+}
+
+let lastAutonomousRun = 0;
+
+async function runAutonomousTask() {
+  try {
+    // 二重実行防止：前回実行から1時間以内ならスキップ
+    const now = Date.now();
+    if (now - lastAutonomousRun < 3600000) {
+      console.log('[autonomous] Skipping hourly trigger (last run was ' + Math.round((now - lastAutonomousRun) / 60000) + 'min ago)');
+      return;
+    }
+    lastAutonomousRun = now;
+
+    const companies = reg.listMeta();
+    if (!companies || companies.length === 0) return;
+    const company = companies[0];
+    const trigger = '[自律チェック] 毎時の状況確認です。現在稼働中のエージェントの進捗を確認し、必要なアクションがあれば実行してください。';
+    console.log(`[autonomous] Sending hourly trigger to company ${company.id}`);
+    await runAutonomousMessage(company.id, trigger);
+  } catch (err) {
+    console.error('[autonomous] hourly task error:', err.message);
+    // エラーでもlastAutonomousRunを維持してリトライを防ぐ
+  }
+}
+
+function scheduleDaily() {
+  const now = new Date();
+  // JST = UTC+9
+  const jstHours = (now.getUTCHours() + 9) % 24;
+  const jstMinutes = now.getUTCMinutes();
+  const jstSeconds = now.getUTCSeconds();
+  const jstMs = now.getUTCMilliseconds();
+
+  let msUntil9 = ((9 - jstHours) * 60 * 60 - jstMinutes * 60 - jstSeconds) * 1000 - jstMs;
+  if (msUntil9 <= 0) msUntil9 += 24 * 60 * 60 * 1000;
+
+  console.log(`[autonomous] Daily briefing scheduled in ${Math.round(msUntil9 / 60000)} minutes (JST 09:00)`);
+
+  setTimeout(async () => {
+    try {
+      const companies = reg.listMeta();
+      if (companies && companies.length > 0) {
+        const companyId = companies[0].id;
+
+        // 昨日のアクティビティログを収集
+        const yesterday = new Date(Date.now() - 86400000).toISOString();
+        const yesterdayLogs = getActivityLog({ dateFrom: yesterday, limit: 500 });
+        const completedCount = yesterdayLogs.filter((l) => l.action === 'agent_execute' || l.action === 'create').length;
+
+        // Skillsレポートを収集
+        const skillsDir = path.join(__dirname, 'core', 'skills');
+        const skillsReport = await collectDailySkillsReport(skillsDir).catch(() => null);
+        const newSkillsCount = skillsReport?.newSkills?.length || 0;
+        const newSkillsList = skillsReport?.newSkills?.join(', ') || '';
+
+        // デイリーレポートを含む「おはよう」メッセージ
+        const briefingPrompt = `おはよう。以下のデータを参考に本日のブリーフィングを作成してください。
+
+## 昨日の実績データ
+- 完了アクション数：${completedCount}件
+- 新規Skillsファイル：${newSkillsCount}件${newSkillsList ? `（${newSkillsList}）` : ''}
+
+## 本日実行予定のルーティン
+${(() => {
+  try {
+    const routines = JSON.parse(fs.readFileSync(path.join(__dirname, 'core', 'skills', 'routines.json'), 'utf8')).routines || [];
+    const todayRoutines = routines.filter((r) => r.enabled);
+    return todayRoutines.map((r) => `- ${r.name}（${r.trigger}）`).join('\n') || '（なし）';
+  } catch { return '（取得失敗）'; }
+})()}
+
+簡潔で実用的なブリーフィングをお願いします。`;
+
+        await runAutonomousMessage(companyId, briefingPrompt);
+
+        // フロントエンドにデイリーブリーフィング通知
+        broadcastToCompany(companyId, {
+          type: 'daily_briefing',
+          timestamp: new Date().toISOString(),
+          completedCount,
+          newSkillsCount,
+        });
+
+        console.log('[autonomous] Daily briefing sent with report data');
+      }
+    } catch (err) {
+      console.error('[autonomous] daily briefing error:', err.message);
+    }
+    scheduleDaily();
+  }, msUntil9);
+}
+
+setInterval(() => {
+  runAutonomousTask().catch((err) => console.error('[autonomous] interval error:', err.message));
+}, AUTONOMOUS_INTERVAL_MS);
+console.log(`[autonomous] Hourly task timer registered (interval: ${AUTONOMOUS_INTERVAL_MS / 60000}min)`);
+scheduleDaily();
+// ─────────────────────────────────────────────────────────────────────────────
 
 module.exports = { runServer, server, app };
 

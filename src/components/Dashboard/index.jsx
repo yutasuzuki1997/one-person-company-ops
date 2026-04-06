@@ -4,6 +4,7 @@ import Background from './Background';
 import SecretaryPanel from './SecretaryPanel';
 import AgentPanel from './AgentPanel';
 import AgentDetailModal from './AgentDetailModal';
+import AgentChat from './AgentChat';
 
 // ###DELEGATE等の制御ブロックを除去してdisplay用テキストにする
 function stripControlBlocks(text) {
@@ -24,6 +25,28 @@ function stripControlBlocks(text) {
 function formatTimestamp(date) {
   const d = date instanceof Date ? date : new Date(date);
   return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+
+function formatElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m${rs > 0 ? rs + 's' : ''}`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return `${h}h${rm > 0 ? rm + 'm' : ''}`;
+}
+
+function ElapsedTime({ since, style }) {
+  const [elapsed, setElapsed] = useState(() => since ? Date.now() - new Date(since).getTime() : 0);
+  useEffect(() => {
+    if (!since) return;
+    const id = setInterval(() => setElapsed(Date.now() - new Date(since).getTime()), 1000);
+    return () => clearInterval(id);
+  }, [since]);
+  if (!since) return null;
+  return <span style={style}>{formatElapsed(elapsed)}</span>;
 }
 
 // チャットバブルを生成
@@ -62,8 +85,14 @@ function buildBubbles(messages) {
         resolved: msg.resolved,
         approved: msg.approved,
       });
+    } else if (msg.role === 'agent') {
+      bubbles.push({ type: 'agent', ts, agentId: msg.agentId, agentName: msg.agentName, agentAvatar: msg.agentAvatar, text: msg.content });
     } else if (msg.role === 'error') {
       bubbles.push({ type: 'error', ts, text: msg.content });
+    } else if (msg.type === 'save') {
+      bubbles.push({ type: 'save', ts, text: msg.content, url: msg.url });
+    } else if (msg.type === 'warning') {
+      bubbles.push({ type: 'warning', ts, text: msg.content });
     }
   }
   return bubbles;
@@ -203,6 +232,52 @@ function ChatBubble({ bubble, onConfirm }) {
     );
   }
 
+  if (bubble.type === 'agent') {
+    return (
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 20, flexShrink: 0, lineHeight: 1.2 }}>{bubble.agentAvatar || '🤖'}</span>
+        <div style={{ maxWidth: '80%' }}>
+          <div style={{ fontSize: 10, color: '#aaaaff', marginBottom: 3 }}>
+            {bubble.agentName || 'エージェント'} <span style={{ marginLeft: 4 }}>{ts}</span>
+          </div>
+          <div style={{
+            background: '#1a1a2e',
+            borderRadius: '3px 18px 18px 18px',
+            padding: '10px 14px',
+            color: '#ccccff',
+            fontSize: 13,
+            lineHeight: 1.5,
+            wordBreak: 'break-word',
+            whiteSpace: 'pre-wrap',
+          }}>{bubble.text}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (bubble.type === 'save') {
+    return (
+      <div style={{ margin: '6px 0', padding: '8px 12px', background: '#0a1a0a', borderRadius: 4 }}>
+        <span style={{ color: '#44ff88', fontSize: 13 }}>💾 {bubble.text}</span>
+        {bubble.url && (
+          <span
+            onClick={() => { try { window.electronAPI?.openExternal(bubble.url); } catch { window.open(bubble.url); } }}
+            style={{ color: '#44aaff', fontSize: 12, marginLeft: 8, cursor: 'pointer', textDecoration: 'underline' }}
+          >リンクを開く</span>
+        )}
+      </div>
+    );
+  }
+
+  if (bubble.type === 'warning') {
+    return (
+      <div style={{ margin: '6px 0', padding: '8px 12px', background: '#1a1500', borderRadius: 4 }}>
+        <span style={{ color: '#ffaa00', fontSize: 13 }}>⚠️ {bubble.text}</span>
+        <span style={{ color: '#334155', fontSize: 10, marginLeft: 6 }}>{ts}</span>
+      </div>
+    );
+  }
+
   if (bubble.type === 'error') {
     return (
       <div style={{
@@ -220,8 +295,9 @@ function ChatBubble({ bubble, onConfirm }) {
 }
 
 // タスクターミナル（中央エリア）
-function TaskTerminal({ task, streamContent, agents, onConfirm }) {
+function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, isSending, selectedTaskId }) {
   const bottomRef = useRef(null);
+  const [inputText, setInputText] = useState('');
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -258,26 +334,17 @@ function TaskTerminal({ task, streamContent, agents, onConfirm }) {
           <TaskStatusBadge status={task.status} />
         </div>
 
-        {/* 進捗バー（常に表示） */}
-        <div style={{ marginBottom: isWaiting ? 8 : 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-            <span style={{ fontSize: 10, color: '#475569' }}>
-              {workingAgents.length > 0 ? workingAgents.map((a) => a.name).join(', ') + ' が作業中' : (task.status === 'working' ? '処理中...' : '')}
-            </span>
-            <span style={{ fontSize: 10, color: '#475569' }}>{task.progress || 0}%</span>
-          </div>
-          <div style={{ height: 3, background: 'rgba(51,65,85,0.4)', borderRadius: 2 }}>
-            <div style={{
-              height: '100%',
-              background: task.status === 'waiting'
-                ? '#fbbf24'
-                : task.status === 'review' ? '#a78bfa'
-                : '#38bdf8',
-              width: `${task.progress || 0}%`,
-              borderRadius: 2,
-              transition: 'width 0.5s',
-            }} />
-          </div>
+        {/* 経過時間表示 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: isWaiting ? 8 : 0 }}>
+          <span style={{ fontSize: 10, color: '#475569', flex: 1 }}>
+            {workingAgents.length > 0 ? workingAgents.map((a) => a.displayName || a.name).join(', ') + ' が作業中' : (task.status === 'working' ? '処理中...' : '')}
+          </span>
+          {task.startedAt && (task.status === 'working' || task.status === 'waiting') && (
+            <ElapsedTime
+              since={task.startedAt}
+              style={{ fontSize: 10, color: '#38bdf8', fontVariantNumeric: 'tabular-nums' }}
+            />
+          )}
         </div>
 
         {/* waitingバナー */}
@@ -345,6 +412,73 @@ function TaskTerminal({ task, streamContent, agents, onConfirm }) {
 
         <div ref={bottomRef} />
       </div>
+
+      {/* ── 入力エリア（中央下部固定） ── */}
+      {task && (
+        <div style={{
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          padding: '12px 16px',
+          background: 'rgba(15,17,23,0.95)',
+          flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <textarea
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  if (!inputText.trim() || isSending) return;
+                  onSendMessage(inputText.trim(), selectedTaskId);
+                  setInputText('');
+                }
+              }}
+              placeholder="ジェニーに指示を送る...（Cmd+Enterで送信）"
+              style={{
+                flex: 1,
+                background: '#1a1f2e',
+                border: '1px solid rgba(255,255,255,0.15)',
+                borderRadius: 12,
+                color: 'white',
+                fontSize: 14,
+                padding: '10px 14px',
+                resize: 'none',
+                minHeight: 48,
+                maxHeight: 200,
+                outline: 'none',
+                fontFamily: 'inherit',
+                lineHeight: 1.5,
+                boxSizing: 'border-box',
+              }}
+              rows={1}
+            />
+            <button
+              onClick={() => {
+                if (!inputText.trim() || isSending) return;
+                onSendMessage(inputText.trim(), selectedTaskId);
+                setInputText('');
+              }}
+              disabled={!inputText.trim() || isSending}
+              style={{
+                background: inputText.trim() && !isSending ? '#2a5caa' : '#333',
+                color: 'white',
+                border: 'none',
+                borderRadius: 12,
+                padding: '10px 20px',
+                cursor: inputText.trim() && !isSending ? 'pointer' : 'default',
+                fontSize: 14,
+                flexShrink: 0,
+                height: 48,
+              }}
+            >
+              {isSending ? '...' : '送信'}
+            </button>
+          </div>
+          <div style={{ fontSize: 10, color: '#555', marginTop: 6, textAlign: 'right' }}>
+            Cmd+Enter で送信
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -408,8 +542,37 @@ export default function Dashboard({ onNavigate }) {
   const [isSending, setIsSending] = useState(false);
   const [streamContent, setStreamContent] = useState('');
   const [secretaryStatus, setSecretaryStatus] = useState('idle');
+  // agent_completed 通知バナー
+  const [completionBanner, setCompletionBanner] = useState(null);
 
   const [selectedAgent, setSelectedAgent] = useState(null);
+  const [agentChatOpen, setAgentChatOpen] = useState(false);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  // stream_start/stream_end で管理するアクティブエージェントSet
+  const [activeAgents, setActiveAgents] = useState(new Set());
+
+  // タスク一覧をAPIから復元（起動時）
+  useEffect(() => {
+    fetch('/api/tasks')
+      .then((r) => r.json())
+      .then((list) => {
+        if (!Array.isArray(list) || list.length === 0) return;
+        setTasks(list);
+        // 最後に開いていたタスクを自動選択
+        const lastId = localStorage.getItem('lastTaskId');
+        if (lastId && list.some((t) => t.id === lastId)) {
+          setSelectedTaskId(lastId);
+        } else {
+          setSelectedTaskId(list[list.length - 1].id);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 選択中タスクIDをlocalStorageに保存
+  useEffect(() => {
+    if (selectedTaskId) localStorage.setItem('lastTaskId', selectedTaskId);
+  }, [selectedTaskId]);
 
   // 会社一覧取得
   useEffect(() => {
@@ -469,6 +632,84 @@ export default function Dashboard({ onNavigate }) {
         ));
       } else if (msg.type === 'agents_reloaded') {
         loadAgents(companyId);
+      } else if (msg.type === 'stream_start') {
+        if (msg.agentId) {
+          setActiveAgents((prev) => { const n = new Set(prev); n.add(msg.agentId); return n; });
+        }
+      } else if (msg.type === 'stream_end') {
+        if (msg.agentId) {
+          setActiveAgents((prev) => { const n = new Set(prev); n.delete(msg.agentId); return n; });
+        }
+      } else if (msg.type === 'agent_completed') {
+        const agentName = msg.agentName || 'エージェント';
+        const completedMsg = {
+          id: 'msg-' + Date.now(),
+          role: 'agent',
+          agentId: msg.agentId,
+          agentName,
+          content: msg.message || `${agentName}が作業を完了しました`,
+          timestamp: new Date().toISOString(),
+        };
+        // アクティブタスクに完了メッセージを追加
+        setTasks((prev) => {
+          const taskId = msg.taskId;
+          const target = taskId ? prev.find((t) => t.id === taskId) : prev.find((t) => t.status === 'working');
+          if (!target) return prev;
+          const updated = prev.map((t) =>
+            t.id === target.id ? { ...t, messages: [...(t.messages || []), completedMsg] } : t
+          );
+          // サーバーに保存
+          fetch(`/api/tasks/${target.id}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(completedMsg),
+          }).catch(() => {});
+          return updated;
+        });
+        // 通知バナーを3秒表示
+        setCompletionBanner(`✅ ${agentName}が作業を完了しました`);
+        setTimeout(() => setCompletionBanner(null), 3000);
+      } else if (msg.type === 'routine_started') {
+        console.log(`[routine] Started: ${msg.routineName}`);
+      } else if (msg.type === 'routine_completed') {
+        console.log(`[routine] Completed: ${msg.routineId}`);
+      } else if (msg.type === 'secretary_typing') {
+        // 自律タイマーからのメッセージ開始
+        const autoTaskId = 'auto-task-' + Date.now();
+        const autoTask = {
+          id: autoTaskId,
+          name: '自律チェック',
+          status: 'working',
+          progress: 0,
+          startedAt: new Date().toISOString(),
+          messages: [{ id: 'msg-' + Date.now(), role: 'user', content: msg.text, timestamp: new Date().toISOString() }],
+          lastMessage: msg.text?.slice(0, 40) || '',
+          _autoTaskId: autoTaskId,
+        };
+        setTasks((prev) => [...prev, autoTask]);
+        setSelectedTaskId(autoTaskId);
+        setStreamContent('');
+        wsRef.current._pendingAutoTaskId = autoTaskId;
+      } else if (msg.type === 'secretary_token') {
+        setStreamContent((prev) => (prev || '') + (msg.content || ''));
+      } else if (msg.type === 'secretary_done') {
+        const autoTaskId = wsRef.current?._pendingAutoTaskId;
+        setStreamContent('');
+        if (autoTaskId && msg.content) {
+          const secretaryMsg = {
+            id: 'msg-' + Date.now(),
+            role: 'secretary',
+            content: msg.content,
+            delegations: [],
+            timestamp: new Date().toISOString(),
+          };
+          setTasks((prev) => prev.map((t) =>
+            t.id === autoTaskId
+              ? { ...t, messages: [...t.messages, secretaryMsg], status: 'review', lastMessage: msg.content.slice(0, 50) }
+              : t
+          ));
+          wsRef.current._pendingAutoTaskId = null;
+        }
       }
     };
 
@@ -478,9 +719,14 @@ export default function Dashboard({ onNavigate }) {
   // タスク作成
   const handleCreateTask = useCallback((name) => {
     const id = 'task-' + Date.now();
-    const task = { id, name, status: 'pending', progress: 0, messages: [], lastMessage: '' };
+    const task = { id, name, status: 'pending', progress: 0, messages: [], lastMessage: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     setTasks((prev) => [...prev, task]);
     setSelectedTaskId(id);
+    fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(task),
+    }).catch(() => {});
     return id;
   }, []);
 
@@ -509,14 +755,47 @@ export default function Dashboard({ onNavigate }) {
 
     if (!taskId) {
       const id = 'task-' + Date.now();
-      const taskName = text.slice(0, 30) + (text.length > 30 ? '...' : '');
+      const now = new Date().toISOString();
       const task = {
-        id, name: taskName, status: 'working', progress: 0,
+        id, name: '新しいタスク', status: 'working', progress: 0,
+        startedAt: now, createdAt: now, updatedAt: now,
         messages: [], lastMessage: text.slice(0, 40),
       };
       setTasks((prev) => [...prev, task]);
       setSelectedTaskId(id);
       taskId = id;
+      fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(task),
+      }).catch(() => {});
+
+      // タイトルをバックグラウンドで生成
+      fetch('/api/task/generate-title', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.title) {
+            setTasks((prev) => prev.map((t) =>
+              t.id === id ? { ...t, name: data.title } : t
+            ));
+            fetch(`/api/tasks/${id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: data.title }),
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {
+          setTasks((prev) => prev.map((t) =>
+            t.id === id && t.name === '新しいタスク'
+              ? { ...t, name: text.slice(0, 20) + (text.length > 20 ? '…' : '') }
+              : t
+          ));
+        });
     } else {
       setTasks((prev) => prev.map((t) =>
         t.id === taskId ? { ...t, status: 'working', lastMessage: text.slice(0, 40) } : t
@@ -527,6 +806,12 @@ export default function Dashboard({ onNavigate }) {
     setTasks((prev) => prev.map((t) =>
       t.id === taskId ? { ...t, messages: [...t.messages, userMsg] } : t
     ));
+    // ユーザーメッセージをサーバーに保存
+    fetch(`/api/tasks/${taskId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(userMsg),
+    }).catch(() => {});
 
     setIsSending(true);
     setSecretaryStatus('working');
@@ -618,6 +903,19 @@ export default function Dashboard({ onNavigate }) {
         lastMessage: stripControlBlocks(accumulatedContent).slice(0, 50),
       } : t
     ));
+
+    // 秘書メッセージをサーバーに保存
+    fetch(`/api/tasks/${taskId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(secretaryMsg),
+    }).catch(() => {});
+    // タスクステータス更新を保存
+    fetch(`/api/tasks/${taskId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: nextStatus, lastMessage: stripControlBlocks(accumulatedContent).slice(0, 50) }),
+    }).catch(() => {});
   }, [companyId]);
 
   // 直接指示（AgentDetailModalから）→ タスクログに記録
@@ -682,27 +980,57 @@ export default function Dashboard({ onNavigate }) {
           streamContent={selectedTaskId === selectedTask?.id ? streamContent : ''}
           agents={agents}
           onConfirm={handleConfirm}
+          onSendMessage={handleSendMessage}
+          isSending={isSending}
+          selectedTaskId={selectedTaskId}
         />
       </div>
+
+      {/* agent_completed 通知バナー */}
+      {completionBanner && (
+        <div style={{
+          position: 'fixed', top: 16, right: 16, zIndex: 9999,
+          background: 'rgba(0,40,20,0.95)', border: '1px solid rgba(0,255,136,0.4)',
+          borderRadius: 10, padding: '10px 18px',
+          color: '#00ff88', fontSize: 13, fontWeight: 600,
+          boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+          animation: 'fadeInDown 0.2s ease',
+        }}>
+          {completionBanner}
+        </div>
+      )}
 
       {/* 右カラム：エージェント一覧 */}
       <AgentPanel
         agents={agents}
         companyId={companyId}
+        activeAgents={activeAgents}
         onJdApprove={handleJdApprove}
         onJdReject={handleJdReject}
-        onAgentClick={setSelectedAgent}
+        onAgentClick={(agent) => { setSelectedAgent(agent); setAgentChatOpen(true); setShowDetailModal(false); }}
         pendingConfirms={pendingConfirms}
         onConfirm={handleConfirm}
       />
 
-      {selectedAgent && (
+      {/* エージェントチャット（スライドインパネル） */}
+      {selectedAgent && agentChatOpen && !showDetailModal && (
+        <AgentChat
+          agent={agents.find((a) => a.id === selectedAgent.id) || selectedAgent}
+          companyId={companyId}
+          activeAgents={activeAgents}
+          onClose={() => { setAgentChatOpen(false); setSelectedAgent(null); }}
+          onSwitchToDetail={() => setShowDetailModal(true)}
+        />
+      )}
+
+      {/* JD詳細モーダル（AgentChatから切り替え） */}
+      {selectedAgent && showDetailModal && (
         <AgentDetailModal
           agent={selectedAgent}
           companyId={companyId}
-          onClose={() => setSelectedAgent(null)}
-          onJdApprove={(id) => { handleJdApprove(id); setSelectedAgent(null); }}
-          onJdReject={(id) => { handleJdReject(id); setSelectedAgent(null); }}
+          onClose={() => { setShowDetailModal(false); setAgentChatOpen(false); setSelectedAgent(null); }}
+          onJdApprove={(id) => { handleJdApprove(id); setShowDetailModal(false); setSelectedAgent(null); }}
+          onJdReject={(id) => { handleJdReject(id); setShowDetailModal(false); setSelectedAgent(null); }}
           onDirectInstruction={handleDirectInstruction}
         />
       )}
@@ -711,6 +1039,7 @@ export default function Dashboard({ onNavigate }) {
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes blink-cur { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
         @keyframes blink-waiting { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+        @keyframes fadeInDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
         select option { background: #0f172a; }
       `}</style>
     </div>

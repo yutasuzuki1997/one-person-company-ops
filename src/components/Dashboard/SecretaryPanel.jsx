@@ -29,26 +29,20 @@ export default function SecretaryPanel({
   secretaryStatus,
 }) {
   const [input, setInput] = useState('');
-  const [targetTask, setTargetTask] = useState('new');
   const textareaRef = useRef(null);
-
-  // 送信先セレクト自動更新
-  useEffect(() => {
-    if (selectedTaskId) setTargetTask(selectedTaskId);
-  }, [selectedTaskId]);
 
   const adjustTextarea = () => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   };
 
   const handleSend = () => {
     const text = input.trim();
     if (!text || isSending) return;
-    const isNew = targetTask === 'new';
-    onSendMessage(text, isNew ? null : targetTask);
+    // 左サイドバーからは常に新規タスクとして送信
+    onSendMessage(text, null);
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
   };
@@ -97,8 +91,9 @@ export default function SecretaryPanel({
         )}
 
         {/* ナビゲーション */}
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
           <button onClick={() => onNavigate('companies')} style={navBtn}>エージェント管理</button>
+          <button onClick={() => onNavigate('routines')} style={navBtn}>ルーティン</button>
           <button onClick={() => onNavigate('settings')} style={navBtn}>設定</button>
         </div>
       </div>
@@ -149,37 +144,21 @@ export default function SecretaryPanel({
         )}
       </div>
 
-      {/* ── 入力エリア（下部固定） ── */}
+      {/* ── 新規タスク入力エリア（下部固定） ── */}
       <div style={{
         borderTop: '1px solid rgba(51,65,85,0.35)',
         padding: '10px',
         flexShrink: 0,
       }}>
-        <select
-          value={targetTask}
-          onChange={(e) => setTargetTask(e.target.value)}
-          style={{
-            width: '100%', background: 'rgba(6,13,26,0.7)',
-            border: '1px solid rgba(51,65,85,0.4)', borderRadius: 6,
-            color: '#cbd5e1', padding: '5px 8px', fontSize: 11,
-            cursor: 'pointer', outline: 'none', marginBottom: 7,
-          }}
-        >
-          <option value="new">+ 新しいタスクとして送信</option>
-          {tasks.map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
-
         <textarea
           ref={textareaRef}
           className="chat-textarea"
           value={input}
           onChange={(e) => { setInput(e.target.value); adjustTextarea(); }}
           onKeyDown={handleKeyDown}
-          placeholder="指示を入力...（Cmd+Enterで送信）"
-          rows={3}
-          style={{ minHeight: 60, maxHeight: 160, fontSize: 12 }}
+          placeholder="新しいタスクを開始...（Cmd+Enter）"
+          rows={2}
+          style={{ minHeight: 48, maxHeight: 120, fontSize: 12 }}
         />
 
         <button
@@ -192,7 +171,7 @@ export default function SecretaryPanel({
             <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
               <Spinner /> 処理中...
             </span>
-          ) : '送信'}
+          ) : '＋ 新しいタスク'}
         </button>
       </div>
     </div>

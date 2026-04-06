@@ -1,4 +1,26 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+
+function formatElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m${rs > 0 ? rs + 's' : ''}`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return `${h}h${rm > 0 ? rm + 'm' : ''}`;
+}
+
+function ElapsedTime({ since, style }) {
+  const [elapsed, setElapsed] = useState(() => since ? Date.now() - new Date(since).getTime() : 0);
+  useEffect(() => {
+    if (!since) return;
+    const id = setInterval(() => setElapsed(Date.now() - new Date(since).getTime()), 1000);
+    return () => clearInterval(id);
+  }, [since]);
+  if (!since) return null;
+  return <span style={style}>{formatElapsed(elapsed)}</span>;
+}
 import AgentDetailModal from './AgentDetailModal';
 
 const STATUS_LABELS = { idle: '待機中', working: '作業中', review: 'FB依頼あり', waiting: '承認待ち', error: 'エラー', completed: 'FB依頼あり', preparing: '準備中' };
@@ -26,7 +48,7 @@ const DEPT_COLORS = {
   'その他': '#64748b',
 };
 
-function AgentMiniCard({ agent, onClick }) {
+function AgentMiniCard({ agent, onClick, isStreaming }) {
   const status = agent.status || 'idle';
   return (
     <div
@@ -45,7 +67,7 @@ function AgentMiniCard({ agent, onClick }) {
         <span style={{ fontSize: 16, flexShrink: 0 }}>{agent.avatar || '🤖'}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: '#cbd5e1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {agent.name}
+            {agent.displayName || agent.name}
           </div>
           {status === 'working' && agent.currentTask && (
             <div style={{ fontSize: 10, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -58,16 +80,29 @@ function AgentMiniCard({ agent, onClick }) {
           {STATUS_LABELS[status] || status}
         </span>
       </div>
-      {status === 'working' && (
-        <div className="progress-bar" style={{ marginTop: 5 }}>
-          <div className="progress-fill" style={{ width: `${agent.progress || 0}%` }} />
+      {(status === 'working' || isStreaming) && agent.lastActiveAt && (
+        <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <ElapsedTime
+            since={agent.lastActiveAt}
+            style={{ fontSize: 9, color: '#38bdf8', fontVariantNumeric: 'tabular-nums' }}
+          />
+          {isStreaming && (
+            <span style={{ display: 'flex', gap: 2 }}>
+              {[0, 0.15, 0.3].map((delay, i) => (
+                <span key={i} style={{
+                  width: 3, height: 3, borderRadius: '50%', background: '#38bdf8', display: 'inline-block',
+                  animation: `stream-dot-panel 1s ease-in-out ${delay}s infinite`,
+                }} />
+              ))}
+            </span>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function DeptGroup({ deptName, agents, color, onAgentClick }) {
+function DeptGroup({ deptName, agents, color, onAgentClick, activeAgents }) {
   const [collapsed, setCollapsed] = useState(false);
   const workingCount = agents.filter((a) => a.status === 'working').length;
 
@@ -93,7 +128,7 @@ function DeptGroup({ deptName, agents, color, onAgentClick }) {
         )}
       </button>
       {!collapsed && agents.map((a) => (
-        <AgentMiniCard key={a.id} agent={a} onClick={() => onAgentClick(a)} />
+        <AgentMiniCard key={a.id} agent={a} onClick={() => onAgentClick(a)} isStreaming={activeAgents?.has(a.id)} />
       ))}
     </div>
   );
@@ -144,7 +179,7 @@ function ConfirmPanel({ confirms, onConfirm }) {
   );
 }
 
-export default function AgentPanel({ agents, companyId, onJdApprove, onJdReject, onAgentClick, pendingConfirms, onConfirm }) {
+export default function AgentPanel({ agents, companyId, activeAgents, onJdApprove, onJdReject, onAgentClick, pendingConfirms, onConfirm }) {
   const [selectedAgent, setSelectedAgent] = useState(null);
 
   const handleAgentClick = (agent) => {
@@ -152,9 +187,9 @@ export default function AgentPanel({ agents, companyId, onJdApprove, onJdReject,
     onAgentClick?.(agent);
   };
 
-  // 事業部でグループ化
+  // 事業部でグループ化（order順にソート）
   const grouped = {};
-  for (const a of agents) {
+  for (const a of [...agents].sort((x, y) => (x.order ?? 999) - (y.order ?? 999))) {
     const dept = getDept(a.role);
     if (!grouped[dept]) grouped[dept] = [];
     grouped[dept].push(a);
@@ -205,6 +240,7 @@ export default function AgentPanel({ agents, companyId, onJdApprove, onJdReject,
                 agents={grouped[dept]}
                 color={DEPT_COLORS[dept] || '#64748b'}
                 onAgentClick={handleAgentClick}
+                activeAgents={activeAgents}
               />
             ))
           )}
