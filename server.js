@@ -18,6 +18,7 @@ const { listRepositories, getFileContent, updateFileContent, listFileTree, creat
 const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
 const { logActivity, getActivityLog } = require('./lib/activity-logger');
+const { getMemoryContext, saveCompletionToWorkspace, detectStaleProjects, ensureMemoryFiles, detectProject } = require('./lib/workspace-memory');
 const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
 const { AgentExecutor, buildAgentSystemPrompt } = require('./lib/agent-executor');
 const notion = require('./lib/notion-connector');
@@ -69,6 +70,11 @@ async function writeSkillFromJob({ apiKey, model, agent, jobInstruction }) {
     text = `---\nname: ${slugifyMemberDir(agent.name).replace(/-/g, '_')}_skill\ndescription: ${agent.role}の業務スキル\n---\n\n${text}`;
   }
   return text;
+}
+
+// Markdown記号を除去するユーティリティ
+function stripMarkdown(text) {
+  return (text || '').replace(/^#+\s*/gm, '').replace(/\*\*/g, '').replace(/`/g, '').replace(/^[-*]\s+/gm, '').trim();
 }
 
 const DATA_DIR = process.env.AI_AGENTS_DATA_DIR ? path.resolve(process.env.AI_AGENTS_DATA_DIR) : __dirname;
@@ -1489,20 +1495,20 @@ function buildSecretarySystemPrompt(companyId) {
   const workspace = s.workspace || {};
   const repos = Array.isArray(s.repositories) ? s.repositories : [];
 
-  // エージェント一覧（ペルソナ情報を含む）
+  // エージェント一覧（コンパクト版：トークン節約）
   const agentLines = agents.map((a) => {
-    const skills = (a.skills || []).join(', ') || '(未設定)';
-    const repoIds = (a.repositories || []).join(', ') || '(未設定)';
     const displayName = a.displayName || a.name;
-    const personality = a.persona?.personality || '';
-    const speechStyle = a.persona?.speechStyle || '';
-    return `${a.id}: ${displayName}（${a.name}）/ ${a.role} / status: ${a.status || 'idle'} / progress: ${a.progress || 0}%\n  性格: ${personality || '(未設定)'}\n  話し方: ${speechStyle || '(未設定)'}\n  Skills: ${skills}\n  Repositories: ${repoIds}\n  JD: ${a.jobDescription || '(未設定)'}`;
-  }).join('\n\n');
+    const statusInfo = a.status === 'working' ? ` [作業中: ${(a.currentTask || '').slice(0, 20)}]` : '';
+    return `${a.id}: ${displayName} / ${a.role}${statusInfo}`;
+  }).join('\n');
 
   // リポジトリ一覧
   const repoLines = repos.map((r) => `${r.id || r.repo}: ${r.name || r.repo} (${r.owner}/${r.repo}) - permission: ${r.permission || 'read'}`).join('\n');
 
-  const injection = `\n\n## Current Agents（各エージェントのペルソナを把握して名前で呼ぶこと）\n${agentLines || '(エージェントなし)'}\n\n## Available Repositories\n${repoLines || '(リポジトリなし)'}\n\n## Workspace\nlocalPath: ${workspace.localPath || '(未設定)'}`;
+  const wsRepoInfo = workspace.owner && workspace.repo
+    ? `\nGitHub: ${workspace.owner}/${workspace.repo}（FILE_CREATEでowner="${workspace.owner}" repo="${workspace.repo}"を使うこと）`
+    : '';
+  const injection = `\n\n## Current Agents（各エージェントのペルソナを把握して名前で呼ぶこと）\n${agentLines || '(エージェントなし)'}\n\n## Available Repositories\n${repoLines || '(リポジトリなし)'}\n\n## Workspace\nlocalPath: ${workspace.localPath || '(未設定)'}${wsRepoInfo}`;
 
   // ワークスペースコンテキスト
   let wsCtx = '';
@@ -1511,6 +1517,25 @@ function buildSecretarySystemPrompt(companyId) {
   }
 
   return base + injection + wsCtx;
+}
+
+/**
+ * 記憶付きシステムプロンプト構築（非同期版）
+ * Workspaceのmemory/からプロジェクト情報・好みを読み込んでプロンプトに注入する
+ */
+async function buildSecretarySystemPromptWithMemory(companyId) {
+  const base = buildSecretarySystemPrompt(companyId);
+  const s = readAppSettings();
+  const token = s.githubPersonalToken || s.githubCompanyToken || '';
+  if (!token) return base;
+
+  try {
+    const memoryCtx = await getMemoryContext(token);
+    return base + memoryCtx;
+  } catch (e) {
+    console.error('[memory] 記憶読み込みエラー:', e.message);
+    return base;
+  }
 }
 
 app.post('/api/secretary/message', async (req, res) => {
@@ -1536,6 +1561,162 @@ app.post('/api/secretary/message', async (req, res) => {
   const sendSSE = (data) => {
     try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
   };
+
+  // タスク分類
+  const { classifyTask, checkAmbiguity } = require('./lib/task-classifier');
+  const classification = await classifyTask(String(text).trim(), apiKey);
+  console.log('[secretary] タスク分類:', classification.weight, classification.reason);
+  sendSSE({ type: 'task_classified', weight: classification.weight, reason: classification.reason });
+
+  // 曖昧さチェック（instant以外）
+  if (classification.weight !== 'instant') {
+    try {
+      const ambiguityResult = await checkAmbiguity(String(text).trim(), apiKey);
+      if (ambiguityResult.isAmbiguous) {
+        console.log('[secretary] 曖昧な指示を検出:', ambiguityResult.question);
+        sendSSE({ type: 'token', content: `確認させてください。${ambiguityResult.question}` });
+        sendSSE({ type: 'done' });
+        res.end();
+        return;
+      }
+    } catch (e) {
+      console.error('[secretary] ambiguity check error:', e.message);
+    }
+  }
+
+  // heavy/complexタスクはタスク生成→即返答→バックグラウンド委託
+  if (classification.weight === 'heavy' || classification.weight === 'complex') {
+    // 1. タイトル生成
+    let newTaskTitle = stripMarkdown(String(text).trim().slice(0, 15));
+    try {
+      const titleRes = await completeAnthropic({ apiKey, model: 'claude-haiku-4-5-20251001', system: '10文字以内の日本語タスクタイトルを生成。記号不要。タイトルのみ返す。Markdownは絶対に使わない。', messages: [{ role: 'user', content: text }], maxTokens: 64 });
+      newTaskTitle = stripMarkdown(titleRes.trim().slice(0, 15)) || newTaskTitle;
+    } catch {}
+
+    // 2. 重複チェック → 既存タスクに追記 or 新規作成
+    // タスク名の完全一致 or ユーザー入力のキーワードが既存タスク名に3文字以上含まれるか
+    const existingTasks = loadTasksFile();
+    const inputKeywords = String(text).replace(/[をにのはがでとも。、して]+/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+    const duplicateTask = existingTasks.find(t => {
+      if (t.status === 'archived') return false;
+      // 完全一致
+      if (t.name === newTaskTitle) return true;
+      // キーワード一致（入力のキーワードの半数以上がタスク名に含まれる）
+      if (inputKeywords.length > 0) {
+        const matchCount = inputKeywords.filter(kw => t.name.includes(kw)).length;
+        return matchCount >= Math.ceil(inputKeywords.length / 2);
+      }
+      return false;
+    });
+
+    let newTaskId;
+    if (duplicateTask) {
+      // 同名タスクが存在する場合はそのタスクに追記
+      newTaskId = duplicateTask.id;
+      duplicateTask.status = 'active';
+      duplicateTask.updatedAt = new Date().toISOString();
+      saveTasksFile(existingTasks);
+      saveTaskMessage(newTaskId, { role: 'user', content: text, timestamp: new Date().toISOString() });
+      broadcastToCompany(companyId, { type: 'task_updated', task: duplicateTask });
+    } else {
+      newTaskId = `task-${Date.now()}`;
+      const newTask = { id: newTaskId, name: newTaskTitle, status: 'active', weight: classification.weight, messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), autoCreated: true, assignedAgentId: null };
+      existingTasks.push(newTask);
+      saveTasksFile(existingTasks);
+      broadcastToCompany(companyId, { type: 'task_created', task: newTask });
+    }
+
+    // 4. 委託先エージェントを事前特定（SSEの返答に名前を入れるため）
+    const preAgents = reg.loadAgents(companyId);
+    let delegateTargetName = '';
+    const textLower = String(text).toLowerCase();
+    // 事業部長マッピングからタスクに最適なエージェントを特定
+    const divisionMap = [
+      { keywords: ['wavers', 'あげファンズ', 'noborder', 'rvc', 'snsハック', 'backstage'], name: 'カイ' },
+      { keywords: ['vibe', 'sns', 'youtube', 'ai副業', '個人'], name: 'リク' },
+      { keywords: ['jiggybeats', '音楽', 'サポート', 'ソロ', '作編曲'], name: 'レイ' },
+      { keywords: ['kos', '業務委託'], name: 'クレア' },
+      { keywords: ['コード', '実装', 'エンジニア', 'バグ', 'デプロイ'], name: 'トム' },
+      { keywords: ['デザイン', 'ui', 'ux'], name: 'ソフィア' },
+      { keywords: ['リサーチ', '調査', '分析'], name: 'レン' },
+    ];
+    for (const d of divisionMap) {
+      if (d.keywords.some(kw => textLower.includes(kw))) {
+        delegateTargetName = d.name;
+        break;
+      }
+    }
+    if (!delegateTargetName) delegateTargetName = '担当';
+
+    // 5. SSEで返答（タスク名を繰り返さず、エージェント名と目安時間を明示）
+    const estimatedTime = classification.weight === 'complex' ? '10〜15分' : '数分';
+    if (duplicateTask) {
+      sendSSE({ type: 'token', content: `${delegateTargetName}に再度依頼しました。完了まで${estimatedTime}ほどお待ちください。` });
+    } else {
+      sendSSE({ type: 'token', content: `${delegateTargetName}に依頼しました。完了まで${estimatedTime}ほどかかります。` });
+    }
+    sendSSE({ type: 'done' });
+    res.end();
+
+    // 5. バックグラウンドで委託
+    setImmediate(async () => {
+      try {
+        const agents = reg.loadAgents(companyId);
+        const systemPrompt = (await buildSecretarySystemPromptWithMemory(companyId)) + `
+
+## 重要：委託の順番
+直接担当者に振ってはいけない。必ず事業部長を経由すること。
+
+### 事業部長の一覧
+- BACKSTAGE事業部（WAVERS・あげファンズ・NoBorder・RVC・SNSハック）→ カイ（BACKSTAGE事業部長）
+- 個人事業部（Vibe-Coding・SNS・YouTube・AI副業）→ リク（個人事業部長）
+- 音楽事業部（JiggyBeats・サポート・ソロ・作編曲）→ レイ（音楽事業部長）
+- 業務委託事業部（KOS）→ クレア（業務委託事業部長）
+- エンジニアリング・デザイン・リサーチ → トム・ソフィア・レン（社長室）に直接OK
+
+### 例
+「WAVERSの競合調査」→ カイ（BACKSTAGE事業部長）に委託
+「JiggyBeatsのSNS投稿」→ レイ（音楽事業部長）に委託
+「コードの実装」→ トム（エンジニア）に直接委託OK
+
+以下のタスクを適切な事業部長またはエンジニアリング担当に委託してください。
+必ず###DELEGATE###ブロックを1つだけ出力してください（複数のDELEGATEは不可）。`;
+        const bgResponse = await completeAnthropic({ apiKey, model: s.model || 'claude-sonnet-4-20250514', system: systemPrompt, messages: [{ role: 'user', content: `以下のタスクを適切なエージェントに委託してください：\n${text}` }] });
+        const delegateReBg = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"(?:\s+progress="(\d+)")?(?:\s+estimatedMinutes="(\d+)")?(?:\s+weight="([^"]*)")?###/g;
+        let mBg;
+        while ((mBg = delegateReBg.exec(bgResponse)) !== null) {
+          const [, agentId, task, , , w = classification.weight] = mBg;
+          const agent = agents.find((a) => a.id === agentId);
+          if (!agent) continue;
+          reg.updateAgentById(agentId, { status: 'working', currentTask: task, lastActiveAt: new Date().toISOString() });
+          broadcastToCompany(companyId, { type: 'agent_status', agentId, status: 'working', currentTask: task, taskId: newTaskId });
+          // タスクにassignedAgentIdを保存
+          try {
+            const curTasks = loadTasksFile();
+            const curTask = curTasks.find(t => t.id === newTaskId);
+            if (curTask) {
+              curTask.assignedAgentId = agentId;
+              curTask.assignedAgentName = agent.displayName || agent.name;
+              saveTasksFile(curTasks);
+            }
+          } catch {}
+          const executor = new AgentExecutor({ apiKey, model: s.model || 'claude-sonnet-4-20250514', companyId, agents, broadcast: (msg) => broadcastToCompany(companyId, msg), skillsDir: path.join(__dirname, 'core', 'skills'), saveTaskMessage, githubToken: getGithubToken('personal') || getGithubToken('company'), workspace: s.workspace });
+          const onProg = (pd) => { broadcastToCompany(companyId, { type: 'agent_progress', ...pd }); if (pd.message && pd.type === 'agent_message') { saveTaskMessage(newTaskId, { role: 'agent', content: pd.message, agentId, agentName: agent.displayName || agent.name, timestamp: new Date().toISOString() }); } };
+          console.log(`[AgentExecutor] 起動(bg): ${agent.displayName || agent.name} taskId=${newTaskId}`);
+          executor.execute(agent, task, newTaskId, 0, onProg, w).then(() => {
+            handleAgentCompletion(companyId, agentId, agent.displayName || agent.name, `${agent.displayName || agent.name}が作業を完了しました`, newTaskId, true);
+          }).catch((err) => {
+            console.error('[AgentExecutor] bg error:', err.message);
+            handleAgentCompletion(companyId, agentId, agent.displayName || agent.name, err.message, newTaskId, false);
+          });
+        }
+      } catch (e) {
+        console.error('[secretary] heavy task bg error:', e.message);
+        saveTaskMessage(newTaskId, { role: 'secretary', content: `エラーが発生しました：${e.message}`, timestamp: new Date().toISOString() });
+      }
+    });
+    return;
+  }
 
   // 「組織を最新に」等の同期コマンド
   if (/組織を最新に|エージェントを更新して|sync|同期して/i.test(text)) {
@@ -1590,10 +1771,21 @@ app.post('/api/secretary/message', async (req, res) => {
   // 会話履歴を取得
   const history = reg.loadConversation(companyId);
   const model = s.model || 'claude-sonnet-4-20250514';
-  const system = buildSecretarySystemPrompt(companyId);
+  let system = await buildSecretarySystemPromptWithMemory(companyId);
+
+  // おはようトリガー時はブリーフィングデータを注入
+  const isMorningGreeting = /^(おはよう|おはようございます|good morning)/i.test(String(text).trim());
+  if (isMorningGreeting) {
+    try {
+      const briefingData = await buildMorningBriefingData(companyId);
+      system += buildBriefingContext(briefingData);
+    } catch (e) {
+      console.error('[briefing] data build error:', e.message);
+    }
+  }
 
   // 最新20件のみを messages に変換
-  const recentHistory = history.slice(-20);
+  const recentHistory = history.slice(-5);
   const messages = [
     ...recentHistory.map((m) => ({
       role: m.role === 'user' ? 'user' : 'assistant',
@@ -1644,10 +1836,10 @@ app.post('/api/secretary/message', async (req, res) => {
   const delegations = [];
 
   // DELEGATE ブロック処理
-  const delegateRe = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"(?:\s+progress="(\d+)")?(?:\s+estimatedMinutes="(\d+)")?###/g;
+  const delegateRe = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"(?:\s+progress="(\d+)")?(?:\s+estimatedMinutes="(\d+)")?(?:\s+weight="([^"]*)")?###/g;
   let m;
   while ((m = delegateRe.exec(fullResponse)) !== null) {
-    const [, agentId, task, progress = '0', estimatedMinutes] = m;
+    const [, agentId, task, progress = '0', estimatedMinutes, weight = 'light'] = m;
     const agent = agents.find((a) => a.id === agentId);
     if (agent) {
       const patch = { status: 'working', currentTask: task, progress: Number(progress), lastActiveAt: new Date().toISOString() };
@@ -1678,18 +1870,31 @@ app.post('/api/secretary/message', async (req, res) => {
           agents,
           broadcast: (msg) => broadcastToCompany(companyId, msg),
           skillsDir: path.join(__dirname, 'core', 'skills'),
+          saveTaskMessage,
+          githubToken: getGithubToken('personal') || getGithubToken('company'),
+          workspace: readAppSettings().workspace,
         });
-        console.log(`[AgentExecutor] 起動: ${agent.displayName || agent.name} - ${task.slice(0, 50)}...`);
-        executor.execute(agent, task, 'task-exec-' + Date.now()).then((result) => {
+        const execTaskId = 'task-exec-' + Date.now();
+        const onExecProgress = (progressData) => {
+          broadcastToCompany(companyId, { type: 'agent_progress', ...progressData });
+          if (progressData.message && progressData.type === 'agent_message') {
+            saveTaskMessage(execTaskId, {
+              role: 'agent', content: progressData.message,
+              agentId, agentName: agent.displayName || agent.name,
+              agentAvatar: agent.avatar || '🤖',
+              timestamp: new Date().toISOString(),
+            });
+          }
+        };
+        console.log(`[AgentExecutor] 起動: ${agent.displayName || agent.name} - ${task.slice(0, 50)}... (weight=${weight})`);
+        executor.execute(agent, task, execTaskId, 0, onExecProgress, weight).then((result) => {
           const agentName = agent.displayName || agent.name;
           console.log(`[AgentExecutor] 完了: ${agentName}`);
-          broadcastToCompany(companyId, {
-            type: 'agent_completed', agentId, agentName,
-            message: `${agentName}が作業を完了しました`,
-            taskId: null, success: true,
-          });
+          const summary = (result.response || '').replace(/###[^#]*###/g, '').trim().slice(0, 300);
+          handleAgentCompletion(companyId, agentId, agentName, summary || `${agentName}が作業を完了しました`, execTaskId, true);
         }).catch((err) => {
           console.error(`[AgentExecutor] エラー: ${agent.displayName || agent.name}`, err.message);
+          handleAgentCompletion(companyId, agentId, agent.displayName || agent.name, err.message, execTaskId, false);
         });
       }
     }
@@ -1879,6 +2084,35 @@ app.post('/api/secretary/message', async (req, res) => {
     });
   }
 
+  // FILE_CREATE ブロック処理 → 即実行（確認不要）
+  const fileCreateRe = /###FILE_CREATE\s+owner="([^"]+)"\s+repo="([^"]+)"\s+path="([^"]+)"\s+content="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
+  while ((m = fileCreateRe.exec(fullResponse)) !== null) {
+    const [, owner, repo, filePath, content, fcAgentId, fcTaskId, summary] = m;
+    const fcAgent = agents.find((a) => a.id === fcAgentId);
+    const permission = getRepoPermission(owner, repo);
+    const token = getGithubToken(permission === 'pr' ? 'personal' : 'company');
+    if (token) {
+      const fcResult = await updateFileContent(owner, repo, filePath, content, summary || 'Create by OneCompanyOps', token, permission);
+      if (fcResult.success) {
+        const fileUrl = `https://github.com/${owner}/${repo}/blob/main/${filePath}`;
+        logActivity({
+          agentId: fcAgentId,
+          agentName: fcAgent?.name || null,
+          taskId: fcTaskId,
+          action: 'create',
+          destination: 'github',
+          destinationName: `${owner}/${repo}`,
+          destinationPath: filePath,
+          destinationUrl: fileUrl,
+          summary: summary || `ファイル作成: ${filePath}`,
+        });
+        sendSSE({ type: 'token', content: `\n✅ ファイルを作成しました: ${owner}/${repo}/${filePath}\n→ ${fileUrl}` });
+      } else {
+        sendSSE({ type: 'token', content: `\n❌ ファイル作成に失敗: ${fcResult.error}` });
+      }
+    }
+  }
+
   // NOTION_UPDATE ブロック処理 → 事前確認必須
   const notionUpdateRe = /###NOTION_UPDATE\s+pageId="([^"]+)"\s+properties="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
   while ((m = notionUpdateRe.exec(fullResponse)) !== null) {
@@ -1957,7 +2191,129 @@ app.post('/api/secretary/message', async (req, res) => {
     }
   }
 
-  // 秘書レスポンスのパターンでタスクwaitingを自動検出
+  // NOTION_CREATE ブロック処理 → 即実行（確認不要）
+  const notionCreateRe = /###NOTION_CREATE\s+databaseId="([^"]+)"\s+properties="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
+  while ((m = notionCreateRe.exec(fullResponse)) !== null) {
+    const [, databaseId, properties, ncAgentId, ncTaskId, summary] = m;
+    const ncAgent = agents.find((a) => a.id === ncAgentId);
+    try {
+      const token = getNotionToken();
+      if (token) {
+        const result = await notion.createPage(token, databaseId, properties);
+        if (result.success) {
+          sendSSE({ type: 'token', content: `\n✅ Notionページ作成完了: ${summary}` });
+          logActivity({ agentId: ncAgentId, agentName: ncAgent?.name || ncAgentId, taskId: ncTaskId, action: 'notion_create', destination: 'notion', summary });
+        } else {
+          sendSSE({ type: 'token', content: `\n⚠️ Notion作成エラー: ${result.error}` });
+        }
+      }
+    } catch (e) {
+      sendSSE({ type: 'token', content: `\n⚠️ Notion作成エラー: ${e.message}` });
+    }
+  }
+
+  // NOTION_QUERY ブロック処理 → 即実行（読み取りのみ）
+  const notionQueryRe = /###NOTION_QUERY\s+databaseId="([^"]+)"(?:\s+filter="([^"]*?)")?(?:\s+agentId="([^"]*)")?(?:\s+taskId="([^"]*)")?###/g;
+  while ((m = notionQueryRe.exec(fullResponse)) !== null) {
+    const [, databaseId, filter, nqAgentId, nqTaskId] = m;
+    try {
+      const token = getNotionToken();
+      if (token) {
+        const result = await notion.queryDatabase(token, databaseId, filter || null);
+        if (result.success) {
+          const count = result.data?.length || 0;
+          sendSSE({ type: 'token', content: `\n📋 Notionから${count}件のデータを取得しました` });
+        }
+      }
+    } catch (e) {
+      sendSSE({ type: 'token', content: `\n⚠️ Notionクエリエラー: ${e.message}` });
+    }
+  }
+
+  // SHEETS_READ ブロック処理 → 即実行（読み取りのみ）
+  const sheetsReadRe = /###SHEETS_READ\s+spreadsheetId="([^"]+)"\s+range="([^"]+)"(?:\s+agentId="([^"]*)")?(?:\s+taskId="([^"]*)")?###/g;
+  while ((m = sheetsReadRe.exec(fullResponse)) !== null) {
+    const [, spreadsheetId, range, srAgentId] = m;
+    try {
+      const creds = getSheetsCredentials();
+      if (creds) {
+        const result = await sheets.readRange(creds, spreadsheetId, range);
+        if (result.success) {
+          const rows = result.data?.length || 0;
+          sendSSE({ type: 'token', content: `\n📊 Sheetsから${rows}行のデータを取得しました` });
+        }
+      }
+    } catch (e) {
+      sendSSE({ type: 'token', content: `\n⚠️ Sheets読み取りエラー: ${e.message}` });
+    }
+  }
+
+  // SHEETS_APPEND ブロック処理 → 即実行（確認不要）
+  const sheetsAppendRe = /###SHEETS_APPEND\s+spreadsheetId="([^"]+)"\s+range="([^"]+)"\s+values="([^"]*?)"\s+agentId="([^"]*)"\s+taskId="([^"]*)"\s+summary="([^"]*)"###/g;
+  while ((m = sheetsAppendRe.exec(fullResponse)) !== null) {
+    const [, spreadsheetId, range, values, saAgentId, saTaskId, summary] = m;
+    const saAgent = agents.find((a) => a.id === saAgentId);
+    try {
+      const creds = getSheetsCredentials();
+      if (creds) {
+        const parsedValues = typeof values === 'string' ? JSON.parse(values) : values;
+        const result = await sheets.appendRows(creds, spreadsheetId, range, parsedValues);
+        if (result.success) {
+          sendSSE({ type: 'token', content: `\n✅ Sheetsに追記完了: ${summary}` });
+          logActivity({ agentId: saAgentId, agentName: saAgent?.name || saAgentId, taskId: saTaskId, action: 'sheets_append', destination: 'sheets', summary });
+        } else {
+          sendSSE({ type: 'token', content: `\n⚠️ Sheets追記エラー: ${result.error}` });
+        }
+      }
+    } catch (e) {
+      sendSSE({ type: 'token', content: `\n⚠️ Sheets追記エラー: ${e.message}` });
+    }
+  }
+
+  // GA4_REPORT ブロック処理 → 即実行（読み取りのみ）
+  const ga4ReportRe = /###GA4_REPORT\s+propertyId="([^"]+)"\s+startDate="([^"]+)"\s+endDate="([^"]+)"\s+metrics="([^"]+)"\s+dimensions="([^"]*)"(?:\s+agentId="([^"]*)")?(?:\s+taskId="([^"]*)")?###/g;
+  while ((m = ga4ReportRe.exec(fullResponse)) !== null) {
+    const [, propertyId, startDate, endDate, metrics, dimensions] = m;
+    try {
+      const config = getGA4Config();
+      if (config?.credentials) {
+        const ga4 = require('./lib/ga4-connector');
+        const result = await ga4.runReport(config.credentials, propertyId, { dateRange: { startDate, endDate }, metrics: metrics.split(',').map(m => ({ name: m.trim() })), dimensions: dimensions ? dimensions.split(',').map(d => ({ name: d.trim() })) : [] });
+        if (result.success) {
+          const rows = result.data?.rows?.length || 0;
+          sendSSE({ type: 'token', content: `\n📈 GA4から${rows}件のレポートデータを取得しました` });
+        }
+      }
+    } catch (e) {
+      sendSSE({ type: 'token', content: `\n⚠️ GA4レポートエラー: ${e.message}` });
+    }
+  }
+
+  // RESOURCE_LINK ブロック処理
+  const resourceLinkRe = /###RESOURCE_LINK\s+agentIds="(\[[^\]]*\])"\s+url="([^"]+)"###/g;
+  while ((m = resourceLinkRe.exec(fullResponse)) !== null) {
+    const [, agentIdsStr, resUrl] = m;
+    try {
+      const agentIds = JSON.parse(agentIdsStr);
+      const detected = detectResourceFromUrl(resUrl);
+      if (detected) {
+        for (const aid of agentIds) {
+          const found = reg.findAgentById(aid);
+          if (!found) continue;
+          const agent = found.agent;
+          if (!agent.resources) agent.resources = [];
+          agent.resources.push({ ...detected, id: 'res-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), name: detected.repo || detected.spreadsheetId || detected.databaseId || resUrl, permission: 'read' });
+          reg.updateAgentById(aid, { resources: agent.resources });
+        }
+        broadcastToCompany(companyId, { type: 'agents_reloaded' });
+        console.log(`[resource-link] ${agentIds.length}名にリソース紐付け: ${resUrl}`);
+      }
+    } catch (e) {
+      console.error('[resource-link] error:', e.message);
+    }
+  }
+
+  // 秘書レスポンスのパターン���タスクwaitingを自動���出
   const WAITING_PATTERNS = [
     '確認してください', 'いかがでしょうか', 'よろしいですか',
     '承認をお願い', 'FBをお願い', 'どうしますか', 'ご判断ください',
@@ -2070,21 +2426,27 @@ app.post('/api/task/generate-title', async (req, res) => {
   const { message, text } = req.body || {};
   const messageText = text || message;
   if (!messageText) return res.status(400).json({ error: 'message is required' });
+  // 挨拶パターンの即時判定
+  const greetings = ['おはよう', 'こんにちは', 'こんばんは', 'おはようございます', 'good morning'];
+  if (greetings.some((g) => messageText.trim().toLowerCase().startsWith(g))) {
+    return res.json({ title: '朝のブリーフィング' });
+  }
+
   const s = readAppSettings();
   const apiKey = s.anthropicApiKey || '';
-  if (!apiKey.trim()) return res.json({ title: messageText.slice(0, 10) });
+  if (!apiKey.trim()) return res.json({ title: messageText.slice(0, 10) || '新しいタスク' });
   try {
     let title = '';
     await streamAnthropic({
       apiKey,
       model: 'claude-haiku-4-5-20251001',
-      system: '与えられたメッセージから10文字以内の日本語タイトルを生成してください。記号・句読点不要。タイトルのみを返してください。',
-      messages: [{ role: 'user', content: `メッセージ：${String(messageText).slice(0, 200)}` }],
+      system: 'ユーザーの指示から自然な日本語タスク名を生成。ルール：指示の核心を12文字以内で表す。余計な語（「の件」「について」「してください」）は省く。例：「WAVERSの競合調査をして」→「WAVERS競合調査」、「トムにREADMEを確認させて」→「README確認」、「売上レポートを作って」→「売上レポート作成」。タイトルのみ返す。',
+      messages: [{ role: 'user', content: String(messageText).slice(0, 200) }],
       onText: (chunk) => { title += chunk; },
     });
-    res.json({ title: title.trim().slice(0, 12) || messageText.slice(0, 10) });
+    res.json({ title: stripMarkdown(title.trim()).slice(0, 12) || '新しいタスク' });
   } catch {
-    res.json({ title: messageText.slice(0, 10) });
+    res.json({ title: messageText.slice(0, 10) || '新しいタスク' });
   }
 });
 
@@ -2256,6 +2618,207 @@ app.get('/api/integrations/ga4/realtime', async (req, res) => {
   const config = getGA4Config(req.query.accountId);
   if (!config?.credentials || !config?.propertyId) return res.json({ success: false, error: 'GA4設定が未設定です' });
   res.json(await ga4.getRealtimeData(config.credentials, config.propertyId));
+});
+
+// ── Mixpanel連携 ──────────────────────────────────────────────────────────────
+
+const mixpanel = require('./lib/mixpanel-connector');
+
+function getMixpanelConfig(accountId) {
+  const s = readAppSettings();
+  const accounts = s.integrations?.mixpanel || [];
+  return accountId ? accounts.find((a) => a.id === accountId) : accounts[0];
+}
+
+app.get('/api/integrations/mixpanel/test', async (req, res) => {
+  const config = getMixpanelConfig(req.query.accountId);
+  if (!config?.projectId || !config?.username || !config?.secret) return res.json({ success: false, error: 'Mixpanel設定が未設定です' });
+  res.json(await mixpanel.testConnection(config.projectId, config.username, config.secret));
+});
+
+app.post('/api/integrations/mixpanel/events', async (req, res) => {
+  const config = getMixpanelConfig(req.body.accountId);
+  if (!config?.projectId || !config?.username || !config?.secret) return res.json({ success: false, error: 'Mixpanel設定が未設定です' });
+  res.json(await mixpanel.queryEvents(config.projectId, config.username, config.secret, req.body));
+});
+
+// ── Google Calendar連携 ───────────────────────────────────────────────────────
+
+const calendarConnector = require('./lib/calendar-connector');
+
+function getCalendarAccounts() {
+  const s = readAppSettings();
+  return s.integrations?.googleCalendar || [];
+}
+
+app.get('/api/integrations/calendar/test', async (req, res) => {
+  const accounts = getCalendarAccounts();
+  const account = req.query.accountId ? accounts.find((a) => a.id === req.query.accountId) : accounts[0];
+  if (!account?.credentials) return res.json({ success: false, error: 'カレンダーアカウントが設定されていません' });
+  res.json(await calendarConnector.testConnection(account.credentials));
+});
+
+app.get('/api/integrations/calendar/today', async (req, res) => {
+  const accounts = getCalendarAccounts();
+  const allEvents = [];
+  for (const account of accounts) {
+    if (!account.credentials) continue;
+    const result = await calendarConnector.listTodayEvents(account.credentials, account.label);
+    if (result.success) allEvents.push(...result.events);
+  }
+  allEvents.sort((a, b) => new Date(a.start) - new Date(b.start));
+  res.json({ success: true, events: allEvents });
+});
+
+// ── 朝ブリーフィングデータ構築 ────────────────────────────────────────────────
+
+async function buildMorningBriefingData(companyId) {
+  const s = readAppSettings();
+  const data = { todayEvents: [], urgentTasks: [], workingAgents: [] };
+
+  // 1. カレンダーから今日の予定を取得
+  try {
+    const accounts = s.integrations?.googleCalendar || [];
+    for (const account of accounts) {
+      if (!account.credentials) continue;
+      const result = await calendarConnector.listTodayEvents(account.credentials, account.label);
+      if (result.success) data.todayEvents.push(...result.events);
+    }
+    data.todayEvents.sort((a, b) => new Date(a.start) - new Date(b.start));
+  } catch {}
+
+  // 2. 緊急タスク
+  try {
+    const tasks = loadTasksFile();
+    data.urgentTasks = tasks.filter((t) => t.status === 'active' || t.status === 'waiting' || t.status === 'review' || t.status === 'working').slice(0, 5);
+  } catch {}
+
+  // 3. 稼働中エージェント
+  try {
+    const agents = reg.loadAgents(companyId);
+    const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
+    data.workingAgents = agents.filter((a) => (a.status === 'working' || a.status === 'review') && a.lastActiveAt && new Date(a.lastActiveAt).getTime() > thirtyMinAgo);
+  } catch {}
+
+  // 4. プロジェクト情報（Workspaceから読み込み）
+  try {
+    const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
+    if (ghToken) {
+      const { loadFileFromWorkspace } = require('./lib/workspace-memory');
+      data.projectsContext = await loadFileFromWorkspace('memory/projects.md', ghToken);
+      data.staleProjects = await detectStaleProjects(ghToken);
+    }
+  } catch (e) {
+    console.error('[briefing] project context error:', e.message);
+  }
+
+  return data;
+}
+
+function buildBriefingContext(data) {
+  const eventsSection = data.todayEvents.length > 0
+    ? data.todayEvents.map((e) => {
+        const time = e.start ? new Date(e.start).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '終日';
+        const important = e.isImportant ? ' ⭐重要' : '';
+        return `  ${time} ${e.title}${important}`;
+      }).join('\n')
+    : '  （カレンダー未連携）';
+
+  // FB待ちタスクのみ（reviewステータス）
+  const reviewTasks = (data.urgentTasks || []).filter(t => t.status === 'review');
+  const tasksSection = reviewTasks.length > 0
+    ? reviewTasks.map((t) => `  → ${t.name}（FB待ち）`).join('\n')
+    : '  特に緊急事項はありません';
+
+  const agentsSection = data.workingAgents.length > 0
+    ? data.workingAgents.map((a) => `  ${a.displayName || a.name}: ${a.currentTask || '作業中'}`).join('\n')
+    : '  （全員待機中）';
+
+  // プロジェクトコンテキスト（最大1500文字に制限）
+  const projectsSection = data.projectsContext
+    ? `\n\n### プロジェクト情報（memory/projects.mdから）\n${data.projectsContext.slice(0, 1500)}`
+    : '';
+
+  // 停滞プロジェクト
+  const staleSection = data.staleProjects && data.staleProjects.length > 0
+    ? `\n\n### 停滞プロジェクト（48時間以上更新なし）\n${data.staleProjects.map(p => `  ${p}`).join('\n')}`
+    : '';
+
+  return `\n\n## BRIEFING_DATA（朝ブリーフィング用データ）\n\n### 本日の予定（カレンダー）\n${eventsSection}\n\n### 確認が必要なこと（FB待ちタスク）\n${tasksSection}\n\n### 稼働中エージェント\n${agentsSection}${projectsSection}${staleSection}\n`;
+}
+
+// ── リソース管理 ──────────────────────────────────────────────────────────────
+
+const { detectResourceFromUrl, getRequiredCredentials } = require('./lib/resource-detector');
+
+app.post('/api/agents/detect-resource', (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  const detected = detectResourceFromUrl(url);
+  if (!detected) return res.json({ success: false, error: 'URLからリソースを判定できませんでした' });
+  const s = readAppSettings();
+  const creds = getRequiredCredentials(detected.type, s);
+  res.json({ success: true, resource: detected, credentialsAvailable: creds.available, credentialsMessage: creds.available ? null : creds.message });
+});
+
+app.get('/api/agents/:id/resources', (req, res) => {
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  res.json({ resources: found.agent.resources || [] });
+});
+
+app.post('/api/agents/:id/resources', async (req, res) => {
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  const { url, resource } = req.body;
+
+  // URLから自動判定
+  if (url) {
+    const detected = detectResourceFromUrl(url);
+    if (!detected) return res.json({ success: false, error: 'URLからリソースを判定できませんでした' });
+    const s = readAppSettings();
+    const creds = getRequiredCredentials(detected.type, s);
+    if (!creds.available) return res.json({ needsCredentials: true, message: creds.message, type: detected.type });
+    return res.json({ needsConfirmation: true, resourceInfo: { ...detected, name: detected.repo || detected.spreadsheetId || detected.databaseId || '' } });
+  }
+
+  // 直接追加
+  if (resource) {
+    const agent = found.agent;
+    if (!agent.resources) agent.resources = [];
+    if (!resource.id) resource.id = 'res-' + Date.now();
+    agent.resources.push(resource);
+    reg.updateAgentById(req.params.id, { resources: agent.resources });
+    broadcastToCompany(found.companyId, { type: 'agents_reloaded' });
+    return res.json({ success: true, resource });
+  }
+
+  res.status(400).json({ error: 'url or resource required' });
+});
+
+app.post('/api/agents/:id/resources/confirm', (req, res) => {
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  const { resourceInfo, confirmed } = req.body;
+  if (!confirmed) return res.json({ success: true, cancelled: true });
+  const agent = found.agent;
+  if (!agent.resources) agent.resources = [];
+  const resource = { ...resourceInfo, id: 'res-' + Date.now(), permission: resourceInfo.permission || 'read' };
+  agent.resources.push(resource);
+  reg.updateAgentById(req.params.id, { resources: agent.resources });
+  broadcastToCompany(found.companyId, { type: 'agents_reloaded' });
+  res.json({ success: true, resource });
+});
+
+app.delete('/api/agents/:id/resources/:resourceId', (req, res) => {
+  const found = reg.findAgentById(req.params.id);
+  if (!found) return res.status(404).json({ error: 'not found' });
+  const agent = found.agent;
+  if (!agent.resources) return res.json({ success: true });
+  agent.resources = agent.resources.filter((r) => r.id !== req.params.resourceId);
+  reg.updateAgentById(req.params.id, { resources: agent.resources });
+  broadcastToCompany(found.companyId, { type: 'agents_reloaded' });
+  res.json({ success: true });
 });
 
 // ── アクティビティログ ──────────────────────────────────────────────────────
@@ -2973,6 +3536,15 @@ app.post('/api/routines/:id/run', async (req, res) => {
   executeRoutine(routine).catch((e) => console.error('[routine] manual run error:', e.message));
 });
 
+// 自律チェックの手動トリガー
+app.post('/api/autonomous/trigger', async (req, res) => {
+  const { companyId } = req.body || {};
+  const cid = companyId || reg.primaryCompanyId();
+  res.json({ status: 'started' });
+  lastAutonomousRun = 0; // 強制的にリセット
+  runAutonomousTask().catch((e) => console.error('[autonomous] manual trigger error:', e.message));
+});
+
 // ルーティン二重実行防止用のメモリ管理
 const routineLastRun = new Map();
 
@@ -3043,8 +3615,78 @@ function saveTaskMessage(taskId, message) {
   }
 }
 
+async function handleAgentCompletion(companyId, agentId, agentName, summary, taskId, success) {
+  // 完了報告は3行以内にコンパクト化
+  const compactSummary = summary
+    ? summary.split('\n').filter(l => l.trim()).slice(0, 3).join('\n')
+    : '作業完了';
+  const completionMessage = success
+    ? `✅ ${agentName}が完了\n${compactSummary}`
+    : `❌ ${agentName}でエラー\n${compactSummary}`;
+
+  // 1. タスクに完了メッセージを保存
+  saveTaskMessage(taskId, {
+    role: 'agent',
+    content: completionMessage,
+    agentId, agentName, timestamp: new Date().toISOString(),
+  });
+
+  // 2. タスクステータス更新
+  try {
+    const tasks = loadTasksFile();
+    const task = tasks.find((t) => t.id === taskId);
+    if (task) {
+      task.status = success ? 'review' : 'error';
+      task.updatedAt = new Date().toISOString();
+      saveTasksFile(tasks);
+    }
+  } catch {}
+
+  // 3. WebSocket完了通知
+  broadcastToCompany(companyId, { type: 'agent_completed', agentId, agentName, message: completionMessage, taskId, success });
+
+  // 4. ジェニーが能動的にYutaに報告
+  try {
+    const s = readAppSettings();
+    if (s.anthropicApiKey) {
+      const reportResponse = await completeAnthropic({
+        apiKey: s.anthropicApiKey, model: 'claude-haiku-4-5-20251001',
+        system: '以下の完了報告を鈴木さんに3行以内で伝えてください。次のアクションを1行で提案してください。余計な挨拶・前置き不要。',
+        messages: [{ role: 'user', content: `${agentName}が完了しました：${compactSummary}` }], maxTokens: 256,
+      });
+      broadcastToCompany(companyId, { type: 'secretary_report', message: reportResponse, taskId });
+      saveTaskMessage(taskId, { role: 'secretary', content: reportResponse, timestamp: new Date().toISOString() });
+    }
+  } catch (e) {
+    console.error('[completion-report] error:', e.message);
+  }
+
+  // 5. Workspace記憶に完了記録を保存
+  if (success) {
+    try {
+      const s = readAppSettings();
+      const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
+      if (ghToken) {
+        const tasks = loadTasksFile();
+        const task = tasks.find((t) => t.id === taskId);
+        if (task) {
+          await saveCompletionToWorkspace(task, compactSummary, agentName, ghToken);
+        }
+      }
+    } catch (e) {
+      console.error('[memory] completion save error:', e.message);
+    }
+  }
+}
+
 app.get('/api/tasks', (req, res) => {
-  res.json(loadTasksFile());
+  const all = loadTasksFile();
+  // デフォルトではアーカイブ済みを除外
+  if (req.query.includeArchived === 'true') {
+    res.json(all);
+  } else {
+    res.json(all.filter(t => t.status !== 'archived'));
+  }
 });
 
 app.post('/api/tasks', (req, res) => {
@@ -3074,8 +3716,49 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/tasks/:id/archive', (req, res) => {
+  const tasks = loadTasksFile();
+  const idx = tasks.findIndex((t) => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  tasks[idx].status = 'archived';
+  tasks[idx].updatedAt = new Date().toISOString();
+  saveTasksFile(tasks);
+  res.json(tasks[idx]);
+});
+
 app.post('/api/tasks/:id/messages', (req, res) => {
   saveTaskMessage(req.params.id, { ...req.body, timestamp: req.body.timestamp || new Date().toISOString() });
+  res.json({ ok: true });
+});
+
+// ── ジェニー会話永続化（tasks.jsonとは別管理） ─────────────────────────────
+function getJennyConversationPath() {
+  return path.join(DATA_DIR, 'jenny-conversation.json');
+}
+
+function loadJennyConversation() {
+  try {
+    const p = getJennyConversationPath();
+    if (!fs.existsSync(p)) return [];
+    return JSON.parse(fs.readFileSync(p, 'utf-8'));
+  } catch { return []; }
+}
+
+function saveJennyConversation(messages) {
+  fs.writeFileSync(getJennyConversationPath(), JSON.stringify(messages, null, 2), 'utf-8');
+}
+
+app.get('/api/jenny/conversation', (req, res) => {
+  res.json(loadJennyConversation());
+});
+
+app.post('/api/jenny/conversation', (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages)) return res.status(400).json({ error: 'messages required' });
+  const existing = loadJennyConversation();
+  // 最新100件まで保持
+  const updated = [...existing, ...messages].slice(-100);
+  saveJennyConversation(updated);
   res.json({ ok: true });
 });
 
@@ -3089,8 +3772,8 @@ async function runAutonomousMessage(companyId, text) {
 
   const history = reg.loadConversation(companyId);
   const model = s.model || 'claude-sonnet-4-20250514';
-  const system = buildSecretarySystemPrompt(companyId);
-  const recentHistory = history.slice(-10);
+  const system = await buildSecretarySystemPromptWithMemory(companyId);
+  const recentHistory = history.slice(-5);
   const messages = [
     ...recentHistory.map((msg) => ({
       role: msg.role === 'user' ? 'user' : 'assistant',
@@ -3141,6 +3824,36 @@ async function runAutonomousMessage(companyId, text) {
 
 let lastAutonomousRun = 0;
 
+// 起動時にWorkspaceのmemoryファイルを初期化
+(async () => {
+  try {
+    const s = readAppSettings();
+    const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
+    await ensureMemoryFiles(ghToken);
+  } catch (e) {
+    console.error('[memory] 初期化エラー:', e.message);
+  }
+})();
+
+// 起動時に古い「自律チェック」タスクをアーカイブ
+(() => {
+  try {
+    const tasks = loadTasksFile();
+    let changed = false;
+    for (const t of tasks) {
+      if (t.status !== 'archived' && (t.name || '').includes('自律チェック')) {
+        t.status = 'archived';
+        t.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) {
+      saveTasksFile(tasks);
+      console.log('[autonomous] Archived old autonomous check tasks');
+    }
+  } catch {}
+})();
+
 async function runAutonomousTask() {
   try {
     // 二重実行防止：前回実行から1時間以内ならスキップ
@@ -3154,12 +3867,193 @@ async function runAutonomousTask() {
     const companies = reg.listMeta();
     if (!companies || companies.length === 0) return;
     const company = companies[0];
-    const trigger = '[自律チェック] 毎時の状況確認です。現在稼働中のエージェントの進捗を確認し、必要なアクションがあれば実行してください。';
-    console.log(`[autonomous] Sending hourly trigger to company ${company.id}`);
-    await runAutonomousMessage(company.id, trigger);
+
+    // バックグラウンドでチェックし、問題がある場合のみ通知（タスクは作成しない）
+    console.log(`[autonomous] Running hourly check for company ${company.id}`);
+    await runAutonomousCheck(company.id);
   } catch (err) {
     console.error('[autonomous] hourly task error:', err.message);
-    // エラーでもlastAutonomousRunを維持してリトライを防ぐ
+  }
+}
+
+/**
+ * 自律チェック：
+ * 1. 各事業部長に担当範囲の進捗確認を依頼
+ * 2. 48時間以上停滞しているタスクを自動で再開
+ * 3. 問題があれば通知バナーを出す
+ */
+async function runAutonomousCheck(companyId) {
+  const s = readAppSettings();
+  const apiKey = s.anthropicApiKey || '';
+  if (!apiKey.trim()) return;
+
+  const agents = reg.loadAgents(companyId);
+  const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
+  const stuckAgents = agents.filter(a => a.status === 'working' && a.lastActiveAt && new Date(a.lastActiveAt).getTime() < thirtyMinAgo);
+
+  const tasks = loadTasksFile();
+  const activeTasks = tasks.filter(t => t.status === 'active' || t.status === 'waiting' || t.status === 'review');
+
+  // 停滞プロジェクト検知
+  const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
+  let staleProjects = [];
+  try {
+    staleProjects = await detectStaleProjects(ghToken);
+    if (staleProjects.length > 0) {
+      console.log(`[autonomous] 停滞プロジェクト検知: ${staleProjects.join(', ')}`);
+      broadcastToCompany(companyId, {
+        type: 'notification',
+        level: 'warning',
+        title: 'プロジェクト停滞アラート',
+        message: `${staleProjects.join('・')}が48時間以上更新されていません`,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  } catch (e) {
+    console.error('[autonomous] stale project check error:', e.message);
+  }
+
+  // ── 各事業部長に担当範囲の進捗確認を依頼 ──
+  const divisionHeads = agents.filter(a =>
+    (a.role || '').includes('部長') || (a.displayName || '').includes('事業部長')
+  );
+  if (divisionHeads.length > 0) {
+    const model = s.model || 'claude-sonnet-4-20250514';
+    for (const head of divisionHeads) {
+      try {
+        console.log(`[autonomous] 事業部長チェック依頼: ${head.displayName || head.name}`);
+        const executor = new AgentExecutor({
+          apiKey, model, companyId, agents,
+          broadcast: (msg) => broadcastToCompany(companyId, msg),
+          skillsDir: path.join(__dirname, 'core', 'skills'),
+          saveTaskMessage,
+          githubToken: getGithubToken('personal') || getGithubToken('company'),
+          workspace: s.workspace,
+        });
+        const onProg = (pd) => {
+          broadcastToCompany(companyId, { type: 'agent_progress', ...pd });
+        };
+        executor.execute(
+          head,
+          '担当範囲のプロジェクト進捗を確認してください。止まっているタスクがあれば担当PMに指示して動かしてください。問題がなければ報告不要です。',
+          `autonomous-${Date.now()}`,
+          0,
+          onProg,
+          'light'
+        ).catch(err => console.error(`[autonomous] ${head.displayName || head.name} error:`, err.message));
+      } catch (err) {
+        console.error(`[autonomous] division head check error (${head.displayName}):`, err.message);
+      }
+    }
+  }
+
+  // ── 48時間以上更新のないactiveタスクを検知して再開 ──
+  const fortyEightHoursAgo = Date.now() - 48 * 60 * 60 * 1000;
+  const staleTasks = tasks.filter(t =>
+    t.status === 'active' &&
+    t.updatedAt &&
+    new Date(t.updatedAt).getTime() < fortyEightHoursAgo
+  );
+
+  for (const staleTask of staleTasks) {
+    try {
+      // 担当エージェントを特定
+      const lastAgentMsg = [...(staleTask.messages || [])].reverse().find(m => m.role === 'agent' && m.agentId);
+      if (lastAgentMsg) {
+        const agent = agents.find(a => a.id === lastAgentMsg.agentId);
+        if (agent) {
+          console.log(`[autonomous] 停滞タスク再開: ${staleTask.name} → ${agent.displayName || agent.name}`);
+          const executor = new AgentExecutor({
+            apiKey, model: s.model || 'claude-sonnet-4-20250514', companyId, agents,
+            broadcast: (msg) => broadcastToCompany(companyId, msg),
+            skillsDir: path.join(__dirname, 'core', 'skills'),
+            saveTaskMessage,
+            githubToken: getGithubToken('personal') || getGithubToken('company'),
+            workspace: s.workspace,
+          });
+          const onProg = (pd) => {
+            broadcastToCompany(companyId, { type: 'agent_progress', ...pd });
+            if (pd.message && pd.type === 'agent_message') {
+              saveTaskMessage(staleTask.id, {
+                role: 'agent', content: pd.message,
+                agentId: agent.id, agentName: agent.displayName || agent.name,
+                timestamp: new Date().toISOString(),
+              });
+            }
+          };
+          executor.execute(
+            agent,
+            `このタスク「${staleTask.name}」が48時間以上停滞しています。現状を確認して次のステップを提案してください。`,
+            staleTask.id,
+            0,
+            onProg,
+            'light'
+          ).then(() => {
+            // 提案をYuta向けタスクに追記
+            saveTaskMessage(staleTask.id, {
+              role: 'secretary',
+              content: `⚠️ 停滞タスク「${staleTask.name}」について${agent.displayName || agent.name}が確認しました。次のステップの確認をお願いします。`,
+              timestamp: new Date().toISOString(),
+            });
+            // ステータスをreviewに変更
+            const currentTasks = loadTasksFile();
+            const t = currentTasks.find(ct => ct.id === staleTask.id);
+            if (t) {
+              t.status = 'review';
+              t.updatedAt = new Date().toISOString();
+              saveTasksFile(currentTasks);
+            }
+            broadcastToCompany(companyId, {
+              type: 'task_updated',
+              task: { id: staleTask.id, status: 'review' },
+            });
+          }).catch(err => console.error(`[autonomous] stale task restart error:`, err.message));
+        }
+      }
+    } catch (err) {
+      console.error(`[autonomous] stale task handling error:`, err.message);
+    }
+  }
+
+  // 問題がなければ何もしない
+  if (stuckAgents.length === 0 && activeTasks.length === 0 && staleProjects.length === 0 && staleTasks.length === 0) {
+    console.log('[autonomous] No issues found, skipping notification');
+    return;
+  }
+
+  // 問題がある場合のみLLMに簡潔な状況判断を依頼
+  const workingAgents = agents.filter(a => (a.status === 'working' || a.status === 'review') && a.lastActiveAt && new Date(a.lastActiveAt).getTime() > thirtyMinAgo);
+  const checkPrompt = `以下の状況を確認し、Yutaへの通知が必要か判断してください。
+
+稼働中エージェント: ${workingAgents.map(a => `${a.displayName || a.name}(${a.currentTask || '作業中'})`).join(', ') || 'なし'}
+停滞エージェント（30分以上応答なし）: ${stuckAgents.map(a => `${a.displayName || a.name}`).join(', ') || 'なし'}
+アクティブタスク: ${activeTasks.map(t => `${t.name}(${t.status})`).join(', ') || 'なし'}
+停滞プロジェクト（48時間以上更新なし）: ${staleProjects.join(', ') || 'なし'}
+停滞タスク（48時間以上）: ${staleTasks.map(t => t.name).join(', ') || 'なし'}
+
+返答ルール：
+- 問題なし → "NO_ISSUE" とだけ返す
+- 問題あり → "NOTIFY: {1行の要約}" と返す（例: "NOTIFY: ルカが30分以上停滞中。WAVERSの競合調査が止まっています"）
+- 必ず上記フォーマットで返すこと`;
+
+  try {
+    const result = await completeAnthropic({ apiKey, model: 'claude-haiku-4-5-20251001', system: 'あなたはシステム監視役です。簡潔に状況を判断してください。', messages: [{ role: 'user', content: checkPrompt }], maxTokens: 256 });
+    const response = (result || '').trim();
+    console.log(`[autonomous] Check result: ${response}`);
+
+    if (response.startsWith('NOTIFY:')) {
+      const message = response.replace('NOTIFY:', '').trim();
+      broadcastToCompany(companyId, {
+        type: 'notification',
+        level: 'warning',
+        title: '自律チェック',
+        message,
+        timestamp: new Date().toISOString(),
+      });
+      console.log(`[autonomous] Notification sent: ${message}`);
+    }
+  } catch (err) {
+    console.error('[autonomous] check error:', err.message);
   }
 }
 

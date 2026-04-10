@@ -22,6 +22,11 @@ function stripControlBlocks(text) {
     .trim();
 }
 
+// Markdown記号を除去
+function stripMarkdown(text) {
+  return (text || '').replace(/^#+\s*/gm, '').replace(/\*\*/g, '').replace(/`/g, '').trim();
+}
+
 function formatTimestamp(date) {
   const d = date instanceof Date ? date : new Date(date);
   return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
@@ -59,15 +64,26 @@ function buildBubbles(messages) {
     } else if (msg.role === 'secretary') {
       const clean = stripControlBlocks(msg.content);
       if (clean) bubbles.push({ type: 'secretary', ts, text: clean });
-      // DELEGATEブロック
+      // DELEGATEブロック（agent IDのみの場合は非表示）
       const delegateRe = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"[^#]*###/g;
       let m;
       while ((m = delegateRe.exec(msg.content)) !== null) {
+        // agent IDのみの場合は非表示（displayName付きのdelegationsで表示される）
+        if (/^agent-\d+$/.test(m[1])) continue;
         bubbles.push({ type: 'delegate', ts, agentId: m[1], text: m[2] });
       }
       if (msg.delegations?.length) {
+        // DELEGATEブロックで既に出したagentIdと重複しない委託のみ表示
+        const alreadyDelegated = new Set();
+        const delegateRe2 = /###DELEGATE\s+agentId="([^"]+)"/g;
+        let mm;
+        while ((mm = delegateRe2.exec(msg.content)) !== null) alreadyDelegated.add(mm[1]);
         msg.delegations.forEach((d) => {
-          bubbles.push({ type: 'delegate', ts, agentName: d.agentName || d.agentId, text: d.task });
+          // agent IDのみ（displayNameなし）の場合は非表示
+          if (!d.agentName || /^agent-\d+$/.test(d.agentName)) return;
+          // DELEGATEブロックと重複する場合は非表示
+          if (alreadyDelegated.has(d.agentId)) return;
+          bubbles.push({ type: 'delegate', ts, agentName: d.agentName, text: d.task });
         });
       }
     } else if (msg.role === 'direct') {
@@ -126,9 +142,9 @@ function ChatBubble({ bubble, onConfirm }) {
     return (
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
         <span style={{ fontSize: 24, flexShrink: 0, lineHeight: 1 }}>🤖</span>
-        <div style={{ maxWidth: '80%' }}>
+        <div style={{ maxWidth: '85%' }}>
           <div style={{ fontSize: 10, color: '#888', marginBottom: 3 }}>
-            統括秘書 <span style={{ marginLeft: 4 }}>{ts}</span>
+            ジェニー（統括秘書） <span style={{ marginLeft: 4 }}>{ts}</span>
           </div>
           <div style={{
             background: 'rgba(0,255,136,0.06)',
@@ -331,6 +347,7 @@ function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, i
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
           <span style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0', flex: 1 }}>{task.name}</span>
+          <ProjectBadge name={task.name} />
           <TaskStatusBadge status={task.status} />
         </div>
 
@@ -360,15 +377,16 @@ function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, i
             fontWeight: 600,
             animation: 'blink-waiting 1.5s ease-in-out infinite',
           }}>
-            💬 統括秘書があなたの返答を待っています
+            💬 ジェニーがあなたの返答を待っています
           </div>
         )}
       </div>
 
       {/* チャットエリア */}
       <div style={{
-        flex: 1, overflowY: 'auto', padding: '16px 16px',
+        flex: 1, overflowY: 'auto', padding: '16px 24px',
         background: 'rgba(6,10,18,0.6)',
+        maxWidth: '100%', width: '100%', boxSizing: 'border-box',
       }}>
         {bubbles.length === 0 && !streamContent && (
           <div style={{ color: '#1e3a2a', fontSize: 12, textAlign: 'center', marginTop: 32 }}>
@@ -384,9 +402,9 @@ function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, i
         {streamContent && (
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
             <span style={{ fontSize: 24, flexShrink: 0, lineHeight: 1 }}>🤖</span>
-            <div style={{ maxWidth: '80%' }}>
+            <div style={{ maxWidth: '85%' }}>
               <div style={{ fontSize: 10, color: '#888', marginBottom: 3 }}>
-                統括秘書 <span style={{ marginLeft: 4 }}>{formatTimestamp(new Date())}</span>
+                ジェニー（統括秘書） <span style={{ marginLeft: 4 }}>{formatTimestamp(new Date())}</span>
               </div>
               <div style={{
                 background: 'rgba(0,255,136,0.06)',
@@ -483,13 +501,176 @@ function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, i
   );
 }
 
+// ジェニーチャットビュー（タスクとは別の会話画面）
+function JennyChatView({ messages, streamContent, onSendMessage, isSending }) {
+  const bottomRef = useRef(null);
+  const [inputText, setInputText] = useState('');
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, streamContent]);
+
+  const bubbles = buildBubbles(messages);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* ヘッダー */}
+      <div style={{
+        padding: '10px 16px',
+        borderBottom: '1px solid rgba(51,65,85,0.3)',
+        background: 'rgba(6,13,26,0.7)',
+        flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 24 }}>🤖</span>
+          <div>
+            <span style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0' }}>ジェニー</span>
+            <span style={{ fontSize: 11, color: '#475569', marginLeft: 8 }}>統括秘書</span>
+          </div>
+          <span style={{ color: '#22c55e', fontSize: 8, marginLeft: 4 }}>●</span>
+        </div>
+      </div>
+
+      {/* チャットエリア */}
+      <div style={{
+        flex: 1, overflowY: 'auto', padding: '16px 24px',
+        background: 'rgba(6,10,18,0.6)',
+      }}>
+        {bubbles.length === 0 && !streamContent && (
+          <div style={{ color: '#1e3a2a', fontSize: 12, textAlign: 'center', marginTop: 32 }}>
+            ジェニーに何でも聞いてください
+          </div>
+        )}
+
+        {bubbles.map((bubble, i) => (
+          <ChatBubble key={i} bubble={bubble} />
+        ))}
+
+        {streamContent && (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+            <span style={{ fontSize: 24, flexShrink: 0, lineHeight: 1 }}>🤖</span>
+            <div style={{ maxWidth: '85%' }}>
+              <div style={{ fontSize: 10, color: '#888', marginBottom: 3 }}>
+                ジェニー <span style={{ marginLeft: 4 }}>{formatTimestamp(new Date())}</span>
+              </div>
+              <div style={{
+                background: 'rgba(0,255,136,0.06)',
+                border: '1px solid rgba(0,255,136,0.2)',
+                borderRadius: '3px 18px 18px 18px',
+                padding: '10px 14px',
+                color: '#d4d4d4',
+                fontSize: 14,
+                lineHeight: 1.6,
+                wordBreak: 'break-word',
+                whiteSpace: 'pre-wrap',
+              }}>
+                {stripControlBlocks(streamContent)}
+                <span style={{
+                  display: 'inline-block', width: 7, height: 13,
+                  background: '#00ff88', marginLeft: 2, verticalAlign: 'middle',
+                  animation: 'blink-cur 0.7s ease-in-out infinite',
+                }} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div ref={bottomRef} />
+      </div>
+
+      {/* 入力エリア */}
+      <div style={{
+        borderTop: '1px solid rgba(255,255,255,0.1)',
+        padding: '12px 16px',
+        background: 'rgba(15,17,23,0.95)',
+        flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          <textarea
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                if (!inputText.trim() || isSending) return;
+                onSendMessage(inputText.trim());
+                setInputText('');
+              }
+            }}
+            placeholder="ジェニーに指示を送る...（Cmd+Enterで送信）"
+            style={{
+              flex: 1, background: '#1a1f2e',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: 12, color: 'white', fontSize: 14,
+              padding: '10px 14px', resize: 'none',
+              minHeight: 48, maxHeight: 200, outline: 'none',
+              fontFamily: 'inherit', lineHeight: 1.5, boxSizing: 'border-box',
+            }}
+            rows={1}
+          />
+          <button
+            onClick={() => {
+              if (!inputText.trim() || isSending) return;
+              onSendMessage(inputText.trim());
+              setInputText('');
+            }}
+            disabled={!inputText.trim() || isSending}
+            style={{
+              background: inputText.trim() && !isSending ? '#2a5caa' : '#333',
+              color: 'white', border: 'none', borderRadius: 12,
+              padding: '10px 20px', cursor: inputText.trim() && !isSending ? 'pointer' : 'default',
+              fontSize: 14, flexShrink: 0, height: 48,
+            }}
+          >
+            {isSending ? '...' : '送信'}
+          </button>
+        </div>
+        <div style={{ fontSize: 10, color: '#555', marginTop: 6, textAlign: 'right' }}>
+          Cmd+Enter で送信
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// プロジェクト判定
+function detectProjectName(taskName) {
+  const name = (taskName || '').toLowerCase();
+  if (/wavers/.test(name)) return 'WAVERS';
+  if (/あげファンズ/.test(name)) return 'あげファンズ';
+  if (/noborder/.test(name)) return 'NoBorder';
+  if (/rvc|rvalue/.test(name)) return 'RVC';
+  if (/backstage/.test(name)) return 'BACKSTAGE';
+  if (/overdue/.test(name)) return 'Overdue.';
+  if (/bizsim/.test(name)) return 'BizSim';
+  if (/jiggy|jazz|orchestra/.test(name)) return 'JIGGY BEATS';
+  if (/band.?os/.test(name)) return 'band-os';
+  if (/kos/.test(name)) return 'KOS';
+  if (/onecompany/.test(name)) return 'OCO';
+  return null;
+}
+
+function ProjectBadge({ name }) {
+  const project = detectProjectName(name);
+  if (!project) return null;
+  return (
+    <span style={{
+      fontSize: 10, padding: '1px 6px', borderRadius: 4,
+      background: 'rgba(99,102,241,0.15)', color: '#818cf8',
+      fontWeight: 600, whiteSpace: 'nowrap',
+    }}>{project}</span>
+  );
+}
+
 // タスクステータスバッジ（タスクレベル用）
 function TaskStatusBadge({ status }) {
   const map = {
-    done:     { label: '完了',          cls: 'idle' },
-    waiting:  { label: '返答待ち ⬆',   cls: 'waiting' },
+    active:   { label: '進行中',   cls: 'working' },
+    working:  { label: '進行中',   cls: 'working' },
+    review:   { label: '確認待ち', cls: 'review' },
+    waiting:  { label: '承認待ち', cls: 'waiting' },
+    done:     { label: '完了',     cls: 'idle' },
   };
-  // waiting/done 以外はすべて「進行中」グリーン
   const { label, cls } = map[status] || { label: '進行中', cls: 'working' };
   return (
     <span className={`status-badge status-badge--${cls}`}>
@@ -539,11 +720,25 @@ export default function Dashboard({ onNavigate }) {
   // タスク管理
   const [tasks, setTasks] = useState([]);
   const [selectedTaskId, setSelectedTaskId] = useState(null);
+  const selectedTaskIdRef = useRef(selectedTaskId);
+  useEffect(() => { selectedTaskIdRef.current = selectedTaskId; }, [selectedTaskId]);
   const [isSending, setIsSending] = useState(false);
   const [streamContent, setStreamContent] = useState('');
   const [secretaryStatus, setSecretaryStatus] = useState('idle');
   // agent_completed 通知バナー
   const [completionBanner, setCompletionBanner] = useState(null);
+
+  // ジェニーチャット（タスクとは別の会話）
+  const [jennySelected, setJennySelected] = useState(false);
+  const [jennyMessages, setJennyMessages] = useState([]);
+
+  // ジェニー会話履歴をAPIから復元
+  useEffect(() => {
+    fetch('/api/jenny/conversation')
+      .then((r) => r.json())
+      .then((msgs) => { if (Array.isArray(msgs)) setJennyMessages(msgs); })
+      .catch(() => {});
+  }, []);
 
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [agentChatOpen, setAgentChatOpen] = useState(false);
@@ -573,6 +768,33 @@ export default function Dashboard({ onNavigate }) {
   useEffect(() => {
     if (selectedTaskId) localStorage.setItem('lastTaskId', selectedTaskId);
   }, [selectedTaskId]);
+
+  // 30秒ごとにタスク一覧をリフレッシュ（ステータス同期）
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetch('/api/tasks')
+        .then((r) => r.json())
+        .then((list) => {
+          if (!Array.isArray(list)) return;
+          setTasks((prev) => {
+            // サーバーのデータでステータス・メッセージを更新（ローカルのみの変更は保持）
+            const serverMap = new Map(list.map(t => [t.id, t]));
+            const merged = prev.map(t => {
+              const s = serverMap.get(t.id);
+              if (!s) return t;
+              return { ...t, status: s.status, messages: s.messages, progress: s.progress, lastMessage: s.lastMessage };
+            });
+            // サーバーに新しいタスクがあれば追加
+            for (const s of list) {
+              if (!merged.some(t => t.id === s.id)) merged.push(s);
+            }
+            return merged;
+          });
+        })
+        .catch(() => {});
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // 会社一覧取得
   useEffect(() => {
@@ -626,6 +848,12 @@ export default function Dashboard({ onNavigate }) {
             lastActiveAt: msg.lastActiveAt ?? a.lastActiveAt,
           } : a
         ));
+        // タスク-エージェント同期：assignedAgentIdが一致するタスクのステータスを連動
+        if (msg.taskId && msg.status === 'working') {
+          setTasks((prev) => prev.map((t) =>
+            t.id === msg.taskId && t.status !== 'review' ? { ...t, status: 'active' } : t
+          ));
+        }
       } else if (msg.type === 'jd_proposal') {
         setAgents((prev) => prev.map((a) =>
           a.id === msg.agentId ? { ...a, pendingJdUpdate: msg.proposedJd } : a
@@ -640,35 +868,69 @@ export default function Dashboard({ onNavigate }) {
         if (msg.agentId) {
           setActiveAgents((prev) => { const n = new Set(prev); n.delete(msg.agentId); return n; });
         }
-      } else if (msg.type === 'agent_completed') {
-        const agentName = msg.agentName || 'エージェント';
-        const completedMsg = {
-          id: 'msg-' + Date.now(),
+      } else if (msg.type === 'agent_progress' && msg.message) {
+        // エージェントのリアルタイム発言をチャットに追加
+        const agentMsg = {
+          id: 'agent-msg-' + Date.now(),
           role: 'agent',
+          content: msg.message,
           agentId: msg.agentId,
-          agentName,
-          content: msg.message || `${agentName}が作業を完了しました`,
+          agentName: msg.agentName,
+          agentAvatar: msg.agentAvatar || '🤖',
           timestamp: new Date().toISOString(),
         };
-        // アクティブタスクに完了メッセージを追加
         setTasks((prev) => {
-          const taskId = msg.taskId;
-          const target = taskId ? prev.find((t) => t.id === taskId) : prev.find((t) => t.status === 'working');
+          const target = prev.find((t) => t.status === 'working') || prev[prev.length - 1];
           if (!target) return prev;
           const updated = prev.map((t) =>
-            t.id === target.id ? { ...t, messages: [...(t.messages || []), completedMsg] } : t
+            t.id === target.id ? { ...t, messages: [...(t.messages || []), agentMsg] } : t
           );
-          // サーバーに保存
           fetch(`/api/tasks/${target.id}/messages`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(completedMsg),
+            body: JSON.stringify(agentMsg),
           }).catch(() => {});
           return updated;
         });
-        // 通知バナーを3秒表示
-        setCompletionBanner(`✅ ${agentName}が作業を完了しました`);
-        setTimeout(() => setCompletionBanner(null), 3000);
+        // 直接報告の場合は通知バナー
+        if (msg.isDirect) {
+          setCompletionBanner(`🔔 ${msg.agentName}から直接報告が届きました`);
+          setTimeout(() => setCompletionBanner(null), 5000);
+        }
+      } else if (msg.type === 'agent_completed') {
+        console.log('[WS] agent_completed受信:', msg.agentName, 'taskId:', msg.taskId);
+        if (msg.message) {
+          const newMsg = {
+            id: `agent-complete-${Date.now()}`,
+            role: 'agent',
+            content: msg.message,
+            agentId: msg.agentId,
+            agentName: msg.agentName,
+            agentAvatar: msg.agentAvatar || '🤖',
+            timestamp: new Date().toISOString()
+          };
+          // taskIdが一致するタスクに追加し、ステータスをreviewに変更
+          setTasks(prev => {
+            const targetTask = prev.find(t => t.id === msg.taskId);
+            if (targetTask) {
+              return prev.map(task => {
+                if (task.id !== msg.taskId) return task;
+                return { ...task, messages: [...(task.messages || []), newMsg], status: 'review' };
+              });
+            }
+            // taskIdが見つからない場合はselectedTaskIdのタスクに追加
+            return prev.map(task => {
+              if (task.id !== selectedTaskIdRef?.current) return task;
+              return { ...task, messages: [...(task.messages || []), newMsg], status: 'review' };
+            });
+          });
+          // 通知バナー
+          setCompletionBanner({
+            message: `✅ ${msg.agentName || 'エージェント'}が完了しました`,
+            taskId: msg.taskId
+          });
+          setTimeout(() => setCompletionBanner(null), 8000);
+        }
       } else if (msg.type === 'routine_started') {
         console.log(`[routine] Started: ${msg.routineName}`);
       } else if (msg.type === 'routine_completed') {
@@ -705,11 +967,29 @@ export default function Dashboard({ onNavigate }) {
           };
           setTasks((prev) => prev.map((t) =>
             t.id === autoTaskId
-              ? { ...t, messages: [...t.messages, secretaryMsg], status: 'review', lastMessage: msg.content.slice(0, 50) }
+              ? { ...t, messages: [...t.messages, secretaryMsg], lastMessage: msg.content.slice(0, 50) }
               : t
           ));
           wsRef.current._pendingAutoTaskId = null;
         }
+      } else if (msg.type === 'task_created' && msg.task) {
+        setTasks((prev) => {
+          if (prev.find((t) => t.id === msg.task.id)) return prev;
+          return [...prev, msg.task];
+        });
+        setCompletionBanner({ message: `新しいタスク「${msg.task.name}」を作成しました`, taskId: msg.task.id });
+        setTimeout(() => setCompletionBanner(null), 5000);
+      } else if (msg.type === 'task_updated' && msg.task) {
+        setTasks((prev) => prev.map((t) => t.id === msg.task.id ? { ...t, ...msg.task } : t));
+      } else if (msg.type === 'secretary_report' && msg.message) {
+        // ジェニーからの能動的報告をタスクに追加
+        setTasks((prev) => prev.map((t) => {
+          if (t.id !== msg.taskId) return t;
+          const newMsg = { id: 'secretary-report-' + Date.now(), role: 'secretary', content: msg.message, timestamp: new Date().toISOString() };
+          return { ...t, messages: [...(t.messages || []), newMsg] };
+        }));
+        setCompletionBanner({ message: '🤖 ジェニーから報告が届きました', taskId: msg.taskId });
+        setTimeout(() => setCompletionBanner(null), 5000);
       }
     };
 
@@ -779,13 +1059,14 @@ export default function Dashboard({ onNavigate }) {
         .then((r) => r.json())
         .then((data) => {
           if (data.title) {
+            const cleanTitle = stripMarkdown(data.title);
             setTasks((prev) => prev.map((t) =>
-              t.id === id ? { ...t, name: data.title } : t
+              t.id === id ? { ...t, name: cleanTitle } : t
             ));
             fetch(`/api/tasks/${id}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ name: data.title }),
+              body: JSON.stringify({ name: cleanTitle }),
             }).catch(() => {});
           }
         })
@@ -893,7 +1174,7 @@ export default function Dashboard({ onNavigate }) {
 
     const nextStatus = taskBecameWaiting
       ? 'waiting'
-      : delegations.length > 0 ? 'working' : 'review';
+      : delegations.length > 0 ? 'active' : 'active';
 
     setTasks((prev) => prev.map((t) =>
       t.id === taskId ? {
@@ -916,6 +1197,81 @@ export default function Dashboard({ onNavigate }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: nextStatus, lastMessage: stripControlBlocks(accumulatedContent).slice(0, 50) }),
     }).catch(() => {});
+  }, [companyId]);
+
+  // ジェニーチャット送信（タスクとは別の会話）
+  const handleJennySendMessage = useCallback(async (text) => {
+    const userMsg = { id: 'msg-' + Date.now(), role: 'user', content: text, timestamp: new Date().toISOString() };
+    setJennyMessages((prev) => [...prev, userMsg]);
+
+    setIsSending(true);
+    setSecretaryStatus('working');
+    setStreamContent('');
+
+    let accumulatedContent = '';
+
+    try {
+      const resp = await fetch('/api/secretary/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, companyId }),
+      });
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data: ')) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr) continue;
+          try {
+            const event = JSON.parse(jsonStr);
+            if (event.type === 'token') {
+              accumulatedContent += event.content;
+              setStreamContent(accumulatedContent);
+            } else if (event.type === 'task_created' && event.task) {
+              // heavy/complexはタスクとして生成された → タスクリストに追加
+              setTasks((prev) => {
+                if (prev.find((t) => t.id === event.task.id)) return prev;
+                return [...prev, event.task];
+              });
+            }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+
+    setStreamContent('');
+    setIsSending(false);
+    setSecretaryStatus('idle');
+
+    if (accumulatedContent) {
+      const secretaryMsg = {
+        id: 'msg-' + (Date.now() + 1),
+        role: 'secretary',
+        content: accumulatedContent,
+        timestamp: new Date().toISOString(),
+      };
+      setJennyMessages((prev) => [...prev, secretaryMsg]);
+
+      // ジェニー会話をサーバーに保存
+      fetch('/api/jenny/conversation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [userMsg, secretaryMsg] }),
+      }).catch(() => {});
+    }
   }, [companyId]);
 
   // 直接指示（AgentDetailModalから）→ タスクログに記録
@@ -945,6 +1301,38 @@ export default function Dashboard({ onNavigate }) {
     setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, pendingJdUpdate: null } : a)));
   };
 
+  // タスク完了（doneに変更、リストには薄く残る）
+  const handleArchiveTask = useCallback((taskId) => {
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: 'done' } : t));
+    fetch(`/api/tasks/${taskId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'done' }),
+    }).catch(() => {});
+  }, []);
+
+  // タスク削除
+  const handleDeleteTask = useCallback((taskId) => {
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+    if (selectedTaskId === taskId) setSelectedTaskId(null);
+    fetch(`/api/tasks/${taskId}`, { method: 'DELETE' }).catch(() => {});
+  }, [selectedTaskId]);
+
+  // タスク名変更
+  const handleRenameTask = useCallback((taskId) => {
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    const newName = prompt('タスク名を入力', task.name);
+    if (newName && newName.trim()) {
+      setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, name: newName.trim() } : t));
+      fetch(`/api/tasks/${taskId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName.trim() }),
+      }).catch(() => {});
+    }
+  }, [tasks]);
+
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
 
   // 未解決のconfirmを全タスクから集める → AgentPanelに渡す
@@ -966,37 +1354,60 @@ export default function Dashboard({ onNavigate }) {
         onCompanyChange={setCompanyId}
         tasks={tasks}
         selectedTaskId={selectedTaskId}
-        onSelectTask={setSelectedTaskId}
+        onSelectTask={(id) => { setSelectedTaskId(id); setJennySelected(false); }}
+        onSelectJennyChat={() => { setJennySelected(true); setSelectedTaskId(null); }}
         onCreateTask={handleCreateTask}
         onSendMessage={handleSendMessage}
+        onArchiveTask={handleArchiveTask}
+        onDeleteTask={handleDeleteTask}
+        onRenameTask={handleRenameTask}
         isSending={isSending}
         secretaryStatus={secretaryStatus}
+        jennySelected={jennySelected}
       />
 
       {/* 中央カラム：チャット */}
       <div className="dashboard-center" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <TaskTerminal
-          task={selectedTask}
-          streamContent={selectedTaskId === selectedTask?.id ? streamContent : ''}
-          agents={agents}
-          onConfirm={handleConfirm}
-          onSendMessage={handleSendMessage}
-          isSending={isSending}
-          selectedTaskId={selectedTaskId}
-        />
+        {jennySelected ? (
+          <JennyChatView
+            messages={jennyMessages}
+            streamContent={streamContent}
+            onSendMessage={handleJennySendMessage}
+            isSending={isSending}
+          />
+        ) : (
+          <TaskTerminal
+            task={selectedTask}
+            streamContent={selectedTaskId === selectedTask?.id ? streamContent : ''}
+            agents={agents}
+            onConfirm={handleConfirm}
+            onSendMessage={handleSendMessage}
+            isSending={isSending}
+            selectedTaskId={selectedTaskId}
+          />
+        )}
       </div>
 
-      {/* agent_completed 通知バナー */}
+      {/* 通知バナー */}
       {completionBanner && (
-        <div style={{
-          position: 'fixed', top: 16, right: 16, zIndex: 9999,
-          background: 'rgba(0,40,20,0.95)', border: '1px solid rgba(0,255,136,0.4)',
-          borderRadius: 10, padding: '10px 18px',
-          color: '#00ff88', fontSize: 13, fontWeight: 600,
-          boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
-          animation: 'fadeInDown 0.2s ease',
-        }}>
-          {completionBanner}
+        <div
+          onClick={() => {
+            if (typeof completionBanner === 'object' && completionBanner.taskId) {
+              setSelectedTaskId(completionBanner.taskId);
+            }
+            setCompletionBanner(null);
+          }}
+          style={{
+            position: 'fixed', top: 16, right: 16, zIndex: 9999,
+            background: 'rgba(0,40,20,0.95)', border: '1px solid rgba(0,255,136,0.4)',
+            borderRadius: 10, padding: '10px 18px', cursor: 'pointer',
+            color: '#00ff88', fontSize: 13, fontWeight: 600,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+            animation: 'fadeInDown 0.2s ease',
+            maxWidth: 300,
+          }}
+        >
+          {typeof completionBanner === 'object' ? completionBanner.message : completionBanner}
         </div>
       )}
 
