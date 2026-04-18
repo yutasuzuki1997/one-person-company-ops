@@ -2744,7 +2744,7 @@ function buildBriefingContext(data) {
     ? `\n\n### 停滞プロジェクト（48時間以上更新なし）\n${data.staleProjects.map(p => `  ${p}`).join('\n')}`
     : '';
 
-  return `\n\n## BRIEFING_DATA（朝ブリーフィング用データ）\n\n### 本日の予定（カレンダー）\n${eventsSection}\n\n### 確認が必要なこと（FB待ちタスク）\n${tasksSection}\n\n### 稼働中エージェント\n${agentsSection}${projectsSection}${staleSection}\n`;
+  return `\n\n## BRIEFING_DATA（朝ブリーフィング用データ）\n\n### 本日の予定（カレンダー）\n${eventsSection}\n\n### 確認が必要なこと（FB待ちタスク）\n${tasksSection}\n\n### 稼働中エージェント\n${agentsSection}${projectsSection}${staleSection}\n\n## 朝ブリーフィング応答フォーマット（厳守）\n\n- 全体で **10行以内**。空行を含む\n- マークダウンの見出しは使わない（絵文字＋1行タイトルで代用）\n- 「〜について」「以下の通り」などの前置き禁止\n- 箇条書きは「・」始まり、最大5行\n- **プロジェクト名＋次のアクション** の形で書く（例: \`Overdue：App Storeスクショが未完成（申請ブロッカー）\`）\n- 停滞プロジェクトは 🔴 で列挙、最大3件\n- 最後に「何から始めますか？」で締める\n\n### 理想例\n\n\`\`\`\nおはようございます\n\n📋 今週の優先事項\n・Overdue：App Storeのスクショが未完成（申請ブロッカー）\n・BizSim：Supabaseスキーマが3日間停止中\n\n🔴 停滞アラート\n・JIGGY BEATSサイト：4日間更新なし\n\n何から始めますか？\n\`\`\`\n`;
 }
 
 // ── リソース管理 ──────────────────────────────────────────────────────────────
@@ -3456,7 +3456,15 @@ function calcNextRun(routine) {
     const nowJST = new Date(now.getTime() + 9 * 3600000);
     const targetJST = new Date(nowJST);
     targetJST.setHours(h, m, 0, 0);
-    if (targetJST <= nowJST) targetJST.setDate(targetJST.getDate() + 1);
+    if (routine.trigger === 'weekly') {
+      // dayOfWeek: 0=日, 1=月, ... 6=土 (Date#getDay 準拠)
+      const target = Number.isInteger(routine.dayOfWeek) ? routine.dayOfWeek : nowJST.getDay();
+      const diff = (target - nowJST.getDay() + 7) % 7;
+      targetJST.setDate(nowJST.getDate() + diff);
+      if (targetJST <= nowJST) targetJST.setDate(targetJST.getDate() + 7);
+    } else if (targetJST <= nowJST) {
+      targetJST.setDate(targetJST.getDate() + 1);
+    }
     return new Date(targetJST.getTime() - 9 * 3600000).toISOString();
   }
   return null;
