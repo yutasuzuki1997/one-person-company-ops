@@ -177,3 +177,33 @@
 
 .btn-approve:hover { background: rgba(34,197,94,0.3); }
 .btn-reject:hover  { background: rgba(239,68,68,0.25); }
+
+/* 稼働中バリエーション（作業中は枠が光る） */
+.agent-card--working {
+  border-color: rgba(34, 197, 94, 0.55);
+  box-shadow: 0 0 0 1px rgba(34,197,94,0.25), 0 6px 24px rgba(34,197,94,0.12);
+}
+.agent-card--working::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(34,197,94,0.8), transparent);
+  animation: agent-pulse 2.2s ease-in-out infinite;
+}
+@keyframes agent-pulse {
+  0%,100% { opacity: 0.35; }
+  50%     { opacity: 1; }
+}
+
+.agent-card__project-emoji {
+  margin-left: 6px;
+  font-size: 13px;
+  vertical-align: middle;
+  opacity: 0.9;
+}
+
+.status-elapsed {
+  margin-left: 4px;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 400;
+}
