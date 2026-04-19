@@ -1770,11 +1770,23 @@ app.post('/api/secretary/message', async (req, res) => {
 
   // 会話履歴を取得
   const history = reg.loadConversation(companyId);
-  const model = s.model || 'claude-sonnet-4-20250514';
+  // モデル選択：ユーザー設定があれば優先、無ければタスク分類 weight で Haiku/Sonnet を選ぶ
+  const weight = classification?.weight || 'light';
+  const isMorningGreeting = /^(おはよう|おはようございます|good morning)/i.test(String(text).trim());
+  let model = s.model;
+  if (!model) {
+    if (isMorningGreeting) {
+      model = 'claude-sonnet-4-20250514'; // ブリーフィングは要約力が要る
+    } else if (weight === 'instant' || weight === 'light') {
+      model = 'claude-haiku-4-5-20251001';
+    } else {
+      model = 'claude-sonnet-4-20250514';
+    }
+  }
+  console.log('[secretary] model selected:', model, '(weight:', weight, ')');
   let system = await buildSecretarySystemPromptWithMemory(companyId);
 
   // おはようトリガー時はブリーフィングデータを注入
-  const isMorningGreeting = /^(おはよう|おはようございます|good morning)/i.test(String(text).trim());
   if (isMorningGreeting) {
     try {
       const briefingData = await buildMorningBriefingData(companyId);
