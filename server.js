@@ -1562,9 +1562,14 @@ app.post('/api/secretary/message', async (req, res) => {
     try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
   };
 
-  // タスク分類
+  // 朝ブリーフィング高速判定（正規表現のみ、API呼ばない）
+  const isMorningFastPath = /^(おはよう|おはようございます|good\s*morning)/i.test(String(text).trim());
+
+  // タスク分類（おはようは分類をスキップして instant 扱い）
   const { classifyTask, checkAmbiguity } = require('./lib/task-classifier');
-  const classification = await classifyTask(String(text).trim(), apiKey);
+  const classification = isMorningFastPath
+    ? { weight: 'instant', reason: '朝ブリーフィング（fast path）' }
+    : await classifyTask(String(text).trim(), apiKey);
   console.log('[secretary] タスク分類:', classification.weight, classification.reason);
   sendSSE({ type: 'task_classified', weight: classification.weight, reason: classification.reason });
 
@@ -1741,35 +1746,29 @@ app.post('/api/secretary/message', async (req, res) => {
     return;
   }
 
-  // 「おはよう」を含む場合はWorkspaceを同期してエージェント情報を読み込む
+  // おはようトリガー時はWorkspace同期を非同期で走らせる（応答を待たせない）
+  // メモリ・ブリーフィング生成に必要なデータは直接 GitHub API で取得するので、
+  // git clone / pull の完了は応答速度に影響しない
   if (/おはよう/.test(text)) {
     const workspace = s.workspace || {};
     if (workspace.owner && workspace.repo) {
       const wsToken = getGithubToken(workspace.tokenType || 'personal');
       if (wsToken) {
-        sendSSE({ type: 'token', content: 'ワークスペースを同期しています...\n' });
-        const initResult = await initWorkspace(workspace.owner, workspace.repo, wsToken);
-        if (initResult.success) {
-          wss.clients.forEach((c) => {
-            if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: getWorkspacePath() }));
-          });
-          syncSkillsFromWorkspace();
-          sendSSE({ type: 'token', content: 'エージェント情報を読み込みました。\n' });
-          const agentList = reg.loadAgents(companyId);
-          sendSSE({ type: 'token', content: `本日もよろしくお願いします。${agentList.length}名のスタッフが待機中です。\n` });
-          if (agentList.length > 0) {
-            const summary = agentList.map((a) => `- ${a.name}（${a.role}）: ${a.status || 'idle'}`).join('\n');
-            sendSSE({ type: 'token', content: `\n### スタッフ一覧\n${summary}\n\n` });
+        // fire-and-forget: 応答を blocking しない
+        initWorkspace(workspace.owner, workspace.repo, wsToken).then((initResult) => {
+          if (initResult.success) {
+            wss.clients.forEach((c) => {
+              if (c.readyState === 1) c.send(JSON.stringify({ type: 'workspace_ready', localPath: getWorkspacePath() }));
+            });
+            syncSkillsFromWorkspace();
           }
-        } else {
-          sendSSE({ type: 'token', content: `ワークスペース同期に失敗しました: ${initResult.error}\n\n` });
-        }
+        }).catch((e) => console.error('[briefing] workspace async sync error:', e.message));
       }
     }
   }
 
-  // 会話履歴を取得
-  const history = reg.loadConversation(companyId);
+  // 会話履歴を取得（朝ブリーフィング時は毎回フレッシュに返すため渡さない）
+  const history = isMorningFastPath ? [] : reg.loadConversation(companyId);
   // モデル選択：ユーザー設定があれば優先、無ければタスク分類 weight で Haiku/Sonnet を選ぶ
   const weight = classification?.weight || 'light';
   const isMorningGreeting = /^(おはよう|おはようございます|good morning)/i.test(String(text).trim());
@@ -1784,7 +1783,10 @@ app.post('/api/secretary/message', async (req, res) => {
     }
   }
   console.log('[secretary] model selected:', model, '(weight:', weight, ')');
-  let system = await buildSecretarySystemPromptWithMemory(companyId);
+  // 朝ブリーフィングは memory 注入をスキップ（briefing data に同じ projects.md が入るので二重注入になる）
+  let system = isMorningGreeting
+    ? buildSecretarySystemPrompt(companyId)
+    : await buildSecretarySystemPromptWithMemory(companyId);
 
   // おはようトリガー時はブリーフィングデータを注入
   if (isMorningGreeting) {
@@ -2687,48 +2689,63 @@ app.get('/api/integrations/calendar/today', async (req, res) => {
 async function buildMorningBriefingData(companyId) {
   const s = readAppSettings();
   const data = { todayEvents: [], urgentTasks: [], workingAgents: [], _errors: [] };
+  const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
+  const { loadFileFromWorkspace } = require('./lib/workspace-memory');
 
-  // 1. カレンダーから今日の予定を取得
-  try {
-    const accounts = s.integrations?.googleCalendar || [];
-    if (accounts.length === 0) data._errors.push({ source: 'calendar', msg: '未連携' });
-    for (const account of accounts) {
-      if (!account.credentials) { data._errors.push({ source: 'calendar', msg: `${account.label}: credentials欠落` }); continue; }
-      const result = await calendarConnector.listTodayEvents(account.credentials, account.label);
-      if (result.success) data.todayEvents.push(...result.events);
-      else data._errors.push({ source: 'calendar', msg: `${account.label}: ${result.error}` });
+  // 全処理を並列化（以前は逐次で合計5-15秒かかっていた）
+  const calendarP = (async () => {
+    try {
+      const accounts = s.integrations?.googleCalendar || [];
+      if (accounts.length === 0) return { events: [], errors: [{ source: 'calendar', msg: '未連携' }] };
+      const results = await Promise.all(accounts.map(async (account) => {
+        if (!account.credentials) return { events: [], error: { source: 'calendar', msg: `${account.label}: credentials欠落` } };
+        const r = await calendarConnector.listTodayEvents(account.credentials, account.label);
+        return r.success ? { events: r.events, error: null } : { events: [], error: { source: 'calendar', msg: `${account.label}: ${r.error}` } };
+      }));
+      const events = results.flatMap((x) => x.events);
+      const errors = results.map((x) => x.error).filter(Boolean);
+      events.sort((a, b) => new Date(a.start) - new Date(b.start));
+      return { events, errors };
+    } catch (e) { return { events: [], errors: [{ source: 'calendar', msg: e.message }] }; }
+  })();
+
+  const tasksP = Promise.resolve().then(() => {
+    try {
+      const tasks = loadTasksFile();
+      return { urgent: tasks.filter((t) => t.status === 'active' || t.status === 'waiting' || t.status === 'review' || t.status === 'working').slice(0, 5), errors: [] };
+    } catch (e) { return { urgent: [], errors: [{ source: 'tasks', msg: e.message }] }; }
+  });
+
+  const agentsP = Promise.resolve().then(() => {
+    try {
+      const agents = reg.loadAgents(companyId);
+      const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
+      const working = agents.filter((a) => (a.status === 'working' || a.status === 'review') && a.lastActiveAt && new Date(a.lastActiveAt).getTime() > thirtyMinAgo);
+      return { working, errors: [] };
+    } catch (e) { return { working: [], errors: [{ source: 'agents', msg: e.message }] }; }
+  });
+
+  const workspaceP = (async () => {
+    if (!ghToken) return { projectsContext: null, stale: [], errors: [{ source: 'workspace', msg: 'GitHub token 未設定' }] };
+    try {
+      const [projectsContext, stale] = await Promise.all([
+        loadFileFromWorkspace('memory/projects.md', ghToken),
+        detectStaleProjects(ghToken),
+      ]);
+      return { projectsContext, stale: stale || [], errors: [] };
+    } catch (e) {
+      console.error('[briefing] project context error:', e.message);
+      return { projectsContext: null, stale: [], errors: [{ source: 'workspace', msg: e.message }] };
     }
-    data.todayEvents.sort((a, b) => new Date(a.start) - new Date(b.start));
-  } catch (e) { data._errors.push({ source: 'calendar', msg: e.message }); }
+  })();
 
-  // 2. 緊急タスク
-  try {
-    const tasks = loadTasksFile();
-    data.urgentTasks = tasks.filter((t) => t.status === 'active' || t.status === 'waiting' || t.status === 'review' || t.status === 'working').slice(0, 5);
-  } catch (e) { data._errors.push({ source: 'tasks', msg: e.message }); }
-
-  // 3. 稼働中エージェント
-  try {
-    const agents = reg.loadAgents(companyId);
-    const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
-    data.workingAgents = agents.filter((a) => (a.status === 'working' || a.status === 'review') && a.lastActiveAt && new Date(a.lastActiveAt).getTime() > thirtyMinAgo);
-  } catch (e) { data._errors.push({ source: 'agents', msg: e.message }); }
-
-  // 4. プロジェクト情報（Workspaceから読み込み）
-  try {
-    const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
-    if (!ghToken) {
-      data._errors.push({ source: 'workspace', msg: 'GitHub token 未設定' });
-    } else {
-      const { loadFileFromWorkspace } = require('./lib/workspace-memory');
-      data.projectsContext = await loadFileFromWorkspace('memory/projects.md', ghToken);
-      data.staleProjects = await detectStaleProjects(ghToken);
-    }
-  } catch (e) {
-    console.error('[briefing] project context error:', e.message);
-    data._errors.push({ source: 'workspace', msg: e.message });
-  }
-
+  const [cal, tsk, ag, ws] = await Promise.all([calendarP, tasksP, agentsP, workspaceP]);
+  data.todayEvents = cal.events;
+  data.urgentTasks = tsk.urgent;
+  data.workingAgents = ag.working;
+  data.projectsContext = ws.projectsContext;
+  data.staleProjects = ws.stale;
+  data._errors = [...cal.errors, ...tsk.errors, ...ag.errors, ...ws.errors];
   return data;
 }
 
