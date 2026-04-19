@@ -9,4 +9,4 @@ public/assets/
 .env
 companies/
 *.local
-skills/
+/skills/

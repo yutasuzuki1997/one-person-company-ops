@@ -1,0 +1,92 @@
+{
+  "routines": [
+    {
+      "id": "routine-001",
+      "name": "毎朝のブリーフィング",
+      "description": "JST 09:00 に『おはよう』をジェニーに送り、ブリーフィングを自動生成する",
+      "trigger": "daily",
+      "triggerTime": "09:00",
+      "timezone": "Asia/Tokyo",
+      "enabled": true,
+      "tasks": [
+        {
+          "agentId": "secretary",
+          "action": "おはよう"
+        }
+      ],
+      "lastRun": null,
+      "nextRun": "2026-04-19T15:00:00.000Z"
+    },
+    {
+      "id": "routine-002",
+      "name": "週報レポート生成",
+      "description": "毎週金曜 18:00 に今週の完了タスク・停滞プロジェクトを Workspace に保存",
+      "trigger": "weekly",
+      "triggerTime": "18:00",
+      "dayOfWeek": 5,
+      "timezone": "Asia/Tokyo",
+      "enabled": true,
+      "tasks": [
+        {
+          "agentId": "secretary",
+          "action": "今週のアクティビティを振り返って、Workspace の reports/weekly/{YYYY-WW}.md に保存して。フォーマット：完了タスク5件・停滞3件・来週の優先3件。チャットには要点3行とURLだけ返す"
+        }
+      ],
+      "lastRun": null,
+      "nextRun": "2026-04-24T00:00:00.000Z"
+    },
+    {
+      "id": "routine-003",
+      "name": "停滞プロジェクト検知",
+      "description": "毎日 12:00 に 48時間以上更新のないプロジェクトを検知して通知",
+      "trigger": "daily",
+      "triggerTime": "12:00",
+      "timezone": "Asia/Tokyo",
+      "enabled": true,
+      "tasks": [
+        {
+          "agentId": "secretary",
+          "action": "memory/projects.md を読んで48時間以上更新のないプロジェクトを列挙して。該当があれば🔴つきで最大3件。なければ『全プロジェクト稼働中です』の1行だけ"
+        }
+      ],
+      "lastRun": null,
+      "nextRun": "2026-04-19T18:00:00.000Z"
+    },
+    {
+      "id": "routine-004",
+      "name": "JIGGY BEATS SNS投稿リマインド",
+      "description": "毎週水曜 20:00 にSNS投稿の有無をYutaに確認",
+      "trigger": "weekly",
+      "triggerTime": "20:00",
+      "dayOfWeek": 3,
+      "timezone": "Asia/Tokyo",
+      "enabled": true,
+      "tasks": [
+        {
+          "agentId": "secretary",
+          "action": "JIGGY BEATSのSNS投稿を今週しましたか？していなければアビー（agentId=\"agent-1773292613280\"）にDELEGATEして今週のSNS投稿案を3本作成させてください。3行以内で要点を返す"
+        }
+      ],
+      "lastRun": null,
+      "nextRun": "2026-04-22T02:00:00.000Z"
+    },
+    {
+      "id": "routine-005",
+      "name": "Overdue.進捗確認",
+      "description": "毎週火曜 10:00 に Overdue. のApp Store申請状況を確認",
+      "trigger": "weekly",
+      "triggerTime": "10:00",
+      "dayOfWeek": 2,
+      "timezone": "Asia/Tokyo",
+      "enabled": true,
+      "tasks": [
+        {
+          "agentId": "secretary",
+          "action": "Overdue. のApp Store申請進捗を確認してください。トム（agentId=\"agent-pm-overdue\"）にDELEGATEして、スクリーンショット素材の状況・審査ブロッカー・次のアクションを3行で報告させてください"
+        }
+      ],
+      "lastRun": null,
+      "nextRun": "2026-04-20T16:00:00.000Z"
+    }
+  ]
+}
