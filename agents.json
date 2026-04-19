@@ -150,9 +150,13 @@
     "skills": [
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292538229.md",
-      "core/skills/engineer.md"
+      "core/skills/engineer.md",
+      "core/skills/agents/overdue-playbook.md"
     ],
-    "hierarchyLevel": 3
+    "hierarchyLevel": 3,
+    "secondaryProjects": [
+      "Overdue."
+    ]
   },
   {
     "id": "agent-1773292565445",

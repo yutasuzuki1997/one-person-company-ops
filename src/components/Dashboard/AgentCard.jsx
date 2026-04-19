@@ -19,7 +19,7 @@ const STATUS_LABELS = {
   completed: '✅ 完了',
 };
 
-// プロジェクト名 → 絵文字バッジ
+// プロジェクト名 → 絵文字バッジ（JIGGY BEATS と 音楽事業 を分離）
 const PROJECT_EMOJI = {
   'Overdue': '⏰',
   'Overdue.': '⏰',
@@ -33,7 +33,7 @@ const PROJECT_EMOJI = {
   'AIマーケ（秘匿事業）': '🕵️',
   '目標管理': '🎯',
   'エンジニア': '⚙️',
-  '音楽事業': '🎺',
+  '音楽事業': '🎼',
   'SNSマーケター': '📣',
 };
 
@@ -75,7 +75,7 @@ export default function AgentCard({ agent, onJdApprove, onJdReject }) {
             {agent.name}
             {projectEmoji && <span className="agent-card__project-emoji" title={agent.project}>{projectEmoji}</span>}
           </div>
-          <div className="agent-card__role">{agent.role}{agent.project ? ` · ${agent.project}` : ''}</div>
+          <div className="agent-card__role" title={agent.project || ''}>{agent.role}</div>
         </div>
         <span className={`status-badge status-badge--${status}`}>
           <span className={`status-dot status-dot--${status}`} />

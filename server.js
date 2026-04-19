@@ -2686,42 +2686,47 @@ app.get('/api/integrations/calendar/today', async (req, res) => {
 
 async function buildMorningBriefingData(companyId) {
   const s = readAppSettings();
-  const data = { todayEvents: [], urgentTasks: [], workingAgents: [] };
+  const data = { todayEvents: [], urgentTasks: [], workingAgents: [], _errors: [] };
 
   // 1. カレンダーから今日の予定を取得
   try {
     const accounts = s.integrations?.googleCalendar || [];
+    if (accounts.length === 0) data._errors.push({ source: 'calendar', msg: '未連携' });
     for (const account of accounts) {
-      if (!account.credentials) continue;
+      if (!account.credentials) { data._errors.push({ source: 'calendar', msg: `${account.label}: credentials欠落` }); continue; }
       const result = await calendarConnector.listTodayEvents(account.credentials, account.label);
       if (result.success) data.todayEvents.push(...result.events);
+      else data._errors.push({ source: 'calendar', msg: `${account.label}: ${result.error}` });
     }
     data.todayEvents.sort((a, b) => new Date(a.start) - new Date(b.start));
-  } catch {}
+  } catch (e) { data._errors.push({ source: 'calendar', msg: e.message }); }
 
   // 2. 緊急タスク
   try {
     const tasks = loadTasksFile();
     data.urgentTasks = tasks.filter((t) => t.status === 'active' || t.status === 'waiting' || t.status === 'review' || t.status === 'working').slice(0, 5);
-  } catch {}
+  } catch (e) { data._errors.push({ source: 'tasks', msg: e.message }); }
 
   // 3. 稼働中エージェント
   try {
     const agents = reg.loadAgents(companyId);
     const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
     data.workingAgents = agents.filter((a) => (a.status === 'working' || a.status === 'review') && a.lastActiveAt && new Date(a.lastActiveAt).getTime() > thirtyMinAgo);
-  } catch {}
+  } catch (e) { data._errors.push({ source: 'agents', msg: e.message }); }
 
   // 4. プロジェクト情報（Workspaceから読み込み）
   try {
     const ghToken = s.githubPersonalToken || s.githubCompanyToken || '';
-    if (ghToken) {
+    if (!ghToken) {
+      data._errors.push({ source: 'workspace', msg: 'GitHub token 未設定' });
+    } else {
       const { loadFileFromWorkspace } = require('./lib/workspace-memory');
       data.projectsContext = await loadFileFromWorkspace('memory/projects.md', ghToken);
       data.staleProjects = await detectStaleProjects(ghToken);
     }
   } catch (e) {
     console.error('[briefing] project context error:', e.message);
+    data._errors.push({ source: 'workspace', msg: e.message });
   }
 
   return data;
@@ -2756,7 +2761,12 @@ function buildBriefingContext(data) {
     ? `\n\n### 停滞プロジェクト（48時間以上更新なし）\n${data.staleProjects.map(p => `  ${p}`).join('\n')}`
     : '';
 
-  return `\n\n## BRIEFING_DATA（朝ブリーフィング用データ）\n\n### 本日の予定（カレンダー）\n${eventsSection}\n\n### 確認が必要なこと（FB待ちタスク）\n${tasksSection}\n\n### 稼働中エージェント\n${agentsSection}${projectsSection}${staleSection}\n\n## 朝ブリーフィング応答フォーマット（厳守）\n\n- 全体で **10行以内**。空行を含む\n- マークダウンの見出しは使わない（絵文字＋1行タイトルで代用）\n- 「〜について」「以下の通り」などの前置き禁止\n- 箇条書きは「・」始まり、最大5行\n- **プロジェクト名＋次のアクション** の形で書く（例: \`Overdue：App Storeスクショが未完成（申請ブロッカー）\`）\n- 停滞プロジェクトは 🔴 で列挙、最大3件\n- 最後に「何から始めますか？」で締める\n\n### 理想例\n\n\`\`\`\nおはようございます\n\n📋 今週の優先事項\n・Overdue：App Storeのスクショが未完成（申請ブロッカー）\n・BizSim：Supabaseスキーマが3日間停止中\n\n🔴 停滞アラート\n・JIGGY BEATSサイト：4日間更新なし\n\n何から始めますか？\n\`\`\`\n`;
+  // 連携エラー（silent catch を UI に可視化）
+  const errorSection = (data._errors && data._errors.length > 0)
+    ? `\n\n### ⚠️ 連携エラー（朝ブリーフィング時に発生）\n${data._errors.slice(0, 5).map((e) => `  ${e.source}: ${e.msg}`).join('\n')}\n\n↑上記はブリーフィング末尾に「⚠️ カレンダー: 未連携」のように1行だけ出してよい`
+    : '';
+
+  return `\n\n## BRIEFING_DATA（朝ブリーフィング用データ）\n\n### 本日の予定（カレンダー）\n${eventsSection}\n\n### 確認が必要なこと（FB待ちタスク）\n${tasksSection}\n\n### 稼働中エージェント\n${agentsSection}${projectsSection}${staleSection}${errorSection}\n\n## 朝ブリーフィング応答フォーマット（厳守）\n\n- 全体で **10行以内**。空行を含む\n- マークダウンの見出しは使わない（絵文字＋1行タイトルで代用）\n- 「〜について」「以下の通り」などの前置き禁止\n- 箇条書きは「・」始まり、最大5行\n- **プロジェクト名＋次のアクション** の形で書く（例: \`Overdue：App Storeスクショが未完成（申請ブロッカー）\`）\n- 停滞プロジェクトは 🔴 で列挙、最大3件\n- 最後に「何から始めますか？」で締める\n\n### 理想例\n\n\`\`\`\nおはようございます\n\n📋 今週の優先事項\n・Overdue：App Storeのスクショが未完成（申請ブロッカー）\n・BizSim：Supabaseスキーマが3日間停止中\n\n🔴 停滞アラート\n・JIGGY BEATSサイト：4日間更新なし\n\n何から始めますか？\n\`\`\`\n`;
 }
 
 // ── リソース管理 ──────────────────────────────────────────────────────────────
@@ -3590,12 +3600,20 @@ setInterval(() => {
   }
 }, 60000);
 
-// 起動時にnextRunを初期化
+// 起動時にnextRunを初期化（過去日は自動再計算）
 (function initRoutineNextRun() {
   const routines = loadRoutinesFile();
+  const now = Date.now();
   let changed = false;
   for (const r of routines) {
-    if (!r.nextRun) { r.nextRun = calcNextRun(r); changed = true; }
+    if (!r.nextRun || new Date(r.nextRun).getTime() < now) {
+      const old = r.nextRun;
+      r.nextRun = calcNextRun(r);
+      if (old !== r.nextRun) {
+        console.log(`[routines] refresh nextRun for "${r.name}": ${old || '(none)'} -> ${r.nextRun}`);
+        changed = true;
+      }
+    }
   }
   if (changed) saveRoutinesFile(routines);
   const enabled = routines.filter((r) => r.enabled).length;
