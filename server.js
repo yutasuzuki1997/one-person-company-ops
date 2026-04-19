@@ -3809,7 +3809,11 @@ async function runAutonomousMessage(companyId, text) {
   if (!apiKey.trim()) return;
 
   const history = reg.loadConversation(companyId);
-  const model = s.model || 'claude-sonnet-4-20250514';
+  // ルーティン・自律発火はショート指示がほとんど → Haiku デフォルト
+  // 朝ブリーフィング（"おはよう"）だけ Sonnet に上げる
+  const isMorning = /^(おはよう|おはようございます|good morning)/i.test(String(text).trim());
+  const model = s.model || (isMorning ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5-20251001');
+  console.log('[autonomous] model selected:', model);
   const system = await buildSecretarySystemPromptWithMemory(companyId);
   const recentHistory = history.slice(-5);
   const messages = [
