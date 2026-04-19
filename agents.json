@@ -15,7 +15,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1.md",
       "core/skills/project-manager.md"
-    ]
+    ],
+    "hierarchyLevel": 2
   },
   {
     "id": "agent-2",
@@ -31,7 +32,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-2.md",
       "core/skills/project-manager.md"
-    ]
+    ],
+    "hierarchyLevel": 2
   },
   {
     "id": "agent-3",
@@ -49,7 +51,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-3.md",
       "core/skills/project-manager.md"
-    ]
+    ],
+    "hierarchyLevel": 2
   },
   {
     "id": "agent-4",
@@ -65,7 +68,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-4.md",
       "core/skills/project-manager.md"
-    ]
+    ],
+    "hierarchyLevel": 2
   },
   {
     "id": "agent-5",
@@ -81,7 +85,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-5.md",
       "core/skills/division-head-playbook.md"
-    ]
+    ],
+    "hierarchyLevel": 1
   },
   {
     "id": "agent-6",
@@ -97,7 +102,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-6.md",
       "core/skills/division-head-playbook.md"
-    ]
+    ],
+    "hierarchyLevel": 1
   },
   {
     "id": "agent-1773292418821",
@@ -112,7 +118,8 @@
     "skills": [
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292418821.md"
-    ]
+    ],
+    "hierarchyLevel": 1
   },
   {
     "id": "agent-1773292505845",
@@ -127,7 +134,8 @@
     "skills": [
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292505845.md"
-    ]
+    ],
+    "hierarchyLevel": 3
   },
   {
     "id": "agent-1773292538229",
@@ -143,7 +151,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292538229.md",
       "core/skills/engineer.md"
-    ]
+    ],
+    "hierarchyLevel": 3
   },
   {
     "id": "agent-1773292565445",
@@ -159,7 +168,8 @@
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292565445.md",
       "core/skills/engineer.md"
-    ]
+    ],
+    "hierarchyLevel": 3
   },
   {
     "id": "agent-1773292593762",
@@ -174,7 +184,8 @@
     "skills": [
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292593762.md"
-    ]
+    ],
+    "hierarchyLevel": 3
   },
   {
     "id": "agent-1773292613280",
@@ -189,6 +200,7 @@
     "skills": [
       "core/skills/agents/_common.md",
       "core/skills/agents/agent-1773292613280.md"
-    ]
+    ],
+    "hierarchyLevel": 3
   }
 ]
