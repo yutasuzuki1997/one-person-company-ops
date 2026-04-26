@@ -1569,14 +1569,14 @@ app.post('/api/secretary/message', async (req, res) => {
   const { classifyTask, checkAmbiguity } = require('./lib/task-classifier');
   const classification = isMorningFastPath
     ? { weight: 'instant', reason: '朝ブリーフィング（fast path）' }
-    : await classifyTask(String(text).trim(), apiKey);
+    : await classifyTask(String(text).trim(), s);
   console.log('[secretary] タスク分類:', classification.weight, classification.reason);
   sendSSE({ type: 'task_classified', weight: classification.weight, reason: classification.reason });
 
   // 曖昧さチェック（instant以外）
   if (classification.weight !== 'instant') {
     try {
-      const ambiguityResult = await checkAmbiguity(String(text).trim(), apiKey);
+      const ambiguityResult = await checkAmbiguity(String(text).trim(), s);
       if (ambiguityResult.isAmbiguous) {
         console.log('[secretary] 曖昧な指示を検出:', ambiguityResult.question);
         sendSSE({ type: 'token', content: `確認させてください。${ambiguityResult.question}` });
@@ -1821,6 +1821,32 @@ app.post('/api/secretary/message', async (req, res) => {
   let fullResponse = '';
   const agents = reg.loadAgents(companyId);
 
+  // 朝ブリーフィングでGeminiキーがある場合はllm-routerで生成（非ストリーミング→フェイクストリーム）
+  if (isMorningGreeting && s.geminiApiKey) {
+    streamStart('secretary', null, companyId);
+    try {
+      const { complete: llmComplete } = require('./lib/llm-router');
+      const briefingText = await llmComplete('briefing', system, messages, s);
+      fullResponse = briefingText;
+      sendSSE({ type: 'token', content: briefingText });
+    } catch (e) {
+      streamEnd('secretary', null, companyId);
+      console.error('[briefing] Gemini error, falling back to Anthropic:', e.message);
+      // Anthropicフォールバック処理は下のstreamAnthropicブロックへ継続しないため、
+      // ここで直接フォールバック実行
+      try {
+        await streamAnthropic({ apiKey, model, system, messages, onText: (chunk) => { fullResponse += chunk; sendSSE({ type: 'token', content: chunk }); } });
+      } catch (e2) {
+        sendSSE({ type: 'error', message: e2.message });
+        sendSSE({ type: 'done' });
+        res.end();
+        return;
+      }
+    }
+    streamEnd('secretary', null, companyId);
+    // 以降のDELEGATE処理・会話保存を続けるためフォールスルー
+  } else {
+
   streamStart('secretary', null, companyId);
   try {
     await streamAnthropic({
@@ -1845,6 +1871,7 @@ app.post('/api/secretary/message', async (req, res) => {
     return;
   }
   streamEnd('secretary', null, companyId);
+  } // end else (non-Gemini briefing path)
 
   // レスポンス解析・ブロック処理
   const delegations = [];
@@ -3286,7 +3313,33 @@ function runServer(options = {}) {
   });
 }
 
+function syncSettingsFromInstalled() {
+  const os = require('os');
+  const installedPath = path.join(os.homedir(), 'Library', 'Application Support', 'OneCompanyOps - Yuta', 'app-settings.json');
+  const devPath = path.join(DATA_DIR, 'app-settings.json');
+  if (!fs.existsSync(installedPath)) return;
+  try {
+    const installed = JSON.parse(fs.readFileSync(installedPath, 'utf-8'));
+    const dev = fs.existsSync(devPath) ? JSON.parse(fs.readFileSync(devPath, 'utf-8')) : {};
+    const keys = ['anthropicApiKey', 'githubPersonalToken', 'geminiApiKey', 'openaiApiKey', 'notionToken', 'googleCalendarToken'];
+    let changed = false;
+    for (const k of keys) {
+      if (installed[k] && !dev[k]) {
+        dev[k] = installed[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      fs.writeFileSync(devPath, JSON.stringify(dev, null, 2));
+      console.log('[sync] インストール版からAPIキーを同期しました');
+    }
+  } catch (e) {
+    console.warn('[sync] 設定同期スキップ:', e.message);
+  }
+}
+
 async function mainCli() {
+  syncSettingsFromInstalled();
   try {
     const port = await runServer({
       randomPort: process.env.AI_AGENTS_ELECTRON === '1',
