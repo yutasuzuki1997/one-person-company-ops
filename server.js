@@ -1667,32 +1667,41 @@ app.post('/api/secretary/message', async (req, res) => {
     setImmediate(async () => {
       try {
         const agents = reg.loadAgents(companyId);
+        // 実際のagentIdを使って委託先を構築
+        const l1Agents = agents.filter(a => (a.hierarchyLevel || getAgentHierarchyLevel(a)) === 1);
+        const agentIdMap = l1Agents.map(a => `- agentId="${a.id}"：${a.role}（${a.project || a.displayName || a.name || a.id}）`).join('\n');
         const systemPrompt = (await buildSecretarySystemPromptWithMemory(companyId)) + `
 
 ## 重要：委託の順番
 直接担当者に振ってはいけない。必ず事業部長を経由すること。
 
-### 事業部長の一覧
-- BACKSTAGE事業部（WAVERS・あげファンズ・NoBorder・RVC・SNSハック）→ カイ（BACKSTAGE事業部長）
-- 個人事業部（Vibe-Coding・SNS・YouTube・AI副業）→ リク（個人事業部長）
-- 音楽事業部（JiggyBeats・サポート・ソロ・作編曲）→ レイ（音楽事業部長）
-- 業務委託事業部（KOS）→ クレア（業務委託事業部長）
-- エンジニアリング・デザイン・リサーチ → トム・ソフィア・レン（社長室）に直接OK
+### 委託先（agentIdをそのままDELEGATEに使うこと）
+${agentIdMap || agents.slice(0, 5).map(a => `- agentId="${a.id}"：${a.role}`).join('\n')}
 
-### 例
-「WAVERSの競合調査」→ カイ（BACKSTAGE事業部長）に委託
-「JiggyBeatsのSNS投稿」→ レイ（音楽事業部長）に委託
-「コードの実装」→ トム（エンジニア）に直接委託OK
+追加の専門担当（直接委託OK）：
+- agentId="agent-sp-research"：リサーチ・調査・競合分析
+- agentId="agent-sp-analyst"：データ分析・KPI
+- agentId="agent-pm-overdue"：Overdue.アプリ関連
 
-以下のタスクを適切な事業部長またはエンジニアリング担当に委託してください。
+### ルール
+- WAVERSなどBACKSTAGE系 → agent-5（アプリ事業統括）
+- 個人事業・SNS・音楽 → agent-dh-personal または agent-dh-music
+- リサーチ・調査 → agent-sp-research に直接OK
+
+以下のタスクを適切なエージェントに委託してください。
 必ず###DELEGATE###ブロックを1つだけ出力してください（複数のDELEGATEは不可）。`;
         const bgResponse = await completeAnthropic({ apiKey, model: s.model || 'claude-sonnet-4-20250514', system: systemPrompt, messages: [{ role: 'user', content: `以下のタスクを適切なエージェントに委託してください：\n${text}` }] });
         const delegateReBg = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"(?:\s+progress="(\d+)")?(?:\s+estimatedMinutes="(\d+)")?(?:\s+weight="([^"]*)")?###/g;
+        console.log('[secretary] heavy bg response:', bgResponse.slice(0, 200));
         let mBg;
         while ((mBg = delegateReBg.exec(bgResponse)) !== null) {
           const [, agentId, task, , , w = classification.weight] = mBg;
           const agent = agents.find((a) => a.id === agentId);
-          if (!agent) continue;
+          if (!agent) {
+            console.warn(`[secretary] DELEGATEターゲット not found: agentId="${agentId}" - agents available: ${agents.map(a=>a.id).join(',')}`);
+            continue;
+          }
+          console.log(`[task-list] DELEGATE実行: agentId="${agentId}" task="${task.slice(0,50)}"`);
           reg.updateAgentById(agentId, { status: 'working', currentTask: task, lastActiveAt: new Date().toISOString() });
           broadcastToCompany(companyId, { type: 'agent_status', agentId, status: 'working', currentTask: task, taskId: newTaskId });
           // タスクにassignedAgentIdを保存
