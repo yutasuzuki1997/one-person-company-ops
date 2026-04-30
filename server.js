@@ -21,6 +21,8 @@ const { logActivity, getActivityLog } = require('./lib/activity-logger');
 const { getMemoryContext, saveCompletionToWorkspace, detectStaleProjects, ensureMemoryFiles, detectProject } = require('./lib/workspace-memory');
 const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
 const { AgentExecutor, buildAgentSystemPrompt } = require('./lib/agent-executor');
+const { AgentTeamsManager } = require('./lib/agent-teams-manager');
+let agentTeamsManager = null;
 const notion = require('./lib/notion-connector');
 const sheets = require('./lib/sheets-connector');
 const ga4 = require('./lib/ga4-connector');
@@ -1666,6 +1668,12 @@ app.post('/api/secretary/message', async (req, res) => {
     // 5. バックグラウンドで委託
     setImmediate(async () => {
       try {
+        // AgentTeamsManager が起動していればジェニーに直接送る
+        if (agentTeamsManager && agentTeamsManager.isJennyOnline()) {
+          agentTeamsManager.sendToJenny(text, companyId);
+          return;
+        }
+        // フォールバック：従来の completeAnthropic + AgentExecutor
         const agents = reg.loadAgents(companyId);
         // 実際のagentIdを使って委託先を構築
         const l1Agents = agents.filter(a => (a.hierarchyLevel || getAgentHierarchyLevel(a)) === 1);
@@ -3358,6 +3366,16 @@ async function mainCli() {
     console.log(`AI Agents: http://127.0.0.1:${p}`);
     if (process.env.OPEN_CHROME === '1' && process.platform === 'darwin' && process.env.AI_AGENTS_ELECTRON !== '1') {
       require('child_process').exec(`open -a "Google Chrome" "http://127.0.0.1:${p}"`, () => {});
+    }
+    // Agent Teams Manager 起動
+    const appSettings = readAppSettings();
+    if (appSettings.anthropicApiKey) {
+      agentTeamsManager = new AgentTeamsManager(appSettings, (msg) => {
+        wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(msg)); });
+      });
+      agentTeamsManager.startJenny().catch(e => console.error('[agent-teams] startJenny error:', e.message));
+    } else {
+      console.log('[agent-teams] APIキー未設定のためジェニー起動スキップ');
     }
   } catch (e) {
     console.error(e);
