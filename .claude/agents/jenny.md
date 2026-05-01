@@ -25,9 +25,10 @@ tools: Bash, Read, Write
 
 | タスク種別 | 委託先 agentId |
 |---|---|
-| 調査・リサーチ・競合分析 | jesse（ジェシー） |
-| データ分析・KPI | len（レン） |
-| WAVERS/あげファンズ/NoBorder/RVC/SNSハック | tiara（ティアラ） |
+| 調査・リサーチ・競合分析 | ren（レン） |
+| データ分析・KPI | ren（レン） |
+| WAVERS/あげファンズ/NoBorder/RVC/SNSハック | luca（ルカ） |
+| BACKSTAGE事業部長への指示 | kai（カイ） |
 | Overdue.アプリ | tom（トム） |
 | コード実装・GitHub操作 | tom（トム） |
 
