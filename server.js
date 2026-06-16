@@ -4047,6 +4047,7 @@ async function runAutonomousMessage(companyId, text) {
 
 let lastAutonomousRun = 0;
 let lastGoalAdvanceRun = 0;
+let goalRotationIndex = 0; // 複数事業を順番に前進させるためのローテーション位置
 const GOAL_ADVANCE_MIN_INTERVAL = 4 * 60 * 60 * 1000; // 自走は最短4時間に1回
 
 /**
@@ -4081,7 +4082,9 @@ async function runGoalDrivenAdvance(companyId) {
   }
   lastGoalAdvanceRun = now;
 
-  const g = active[0]; // まず1事業から
+  // 複数事業をラウンドロビンで前進（毎回1事業ずつ）
+  const g = active[goalRotationIndex % active.length];
+  goalRotationIndex = (goalRotationIndex + 1) % active.length;
   const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project);
   agentTeamsManager.sendToJenny(instruction, companyId);

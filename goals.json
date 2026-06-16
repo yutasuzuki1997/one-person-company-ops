@@ -5,5 +5,12 @@
     "goal": "Overdue.(iPhone習慣化アプリ)をApp Store審査通過・公開まで到達させる",
     "currentState": "審査・申請素材の整備フェーズ。リジェクト理由の洗い出しと申請文言・スクショ要件の準備が必要。",
     "owner": "agent-pm-overdue"
+  },
+  {
+    "project": "WAVERS",
+    "active": true,
+    "goal": "WAVERSの差別化戦略を固め、機能スプリントを前進させてApp Store公開・初期成長につなげる",
+    "currentState": "競合調査と差別化ポイントの整理フェーズ。主要競合の機能比較と、次スプリントで作る差別化機能の優先順位付けが必要。",
+    "owner": "agent-1"
   }
 ]
