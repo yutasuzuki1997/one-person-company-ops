@@ -19,6 +19,7 @@ tools: Bash, Read, Write, Agent
 |---|---|
 | Overdue.アプリのApp Store申請・素材・文言・再提出 | `agent-pm-overdue` |
 | WAVERSアプリの差別化戦略・機能スプリント・競合調査の発注 | `agent-1` |
+| あげファンズのファン機能PRD・ユーザー検証・計測設計 | `agent-2` |
 | Web検索・市場調査・競合分析・情報収集 | `agent-sp-research` |
 | データ分析・KPI・数値集計 | `agent-sp-analyst` |
 | コード実装・修正・GitHub操作・バグ修正 | `agent-sp-eng` |
