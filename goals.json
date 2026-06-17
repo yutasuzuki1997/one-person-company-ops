@@ -19,5 +19,85 @@
     "goal": "あげファンズのファン機能の価値検証を前進させ、PRDを固めてユーザー検証と計測設計を回す",
     "currentState": "ファン機能のPRDドラフトと計測設計の初期フェーズ。コア機能の仮説整理とユーザー検証の設計が必要。",
     "owner": "agent-2"
+  },
+  {
+    "project": "NoBorder App",
+    "active": true,
+    "goal": "NoBorderのグローバルUXを検証し多言語対応を前進させて公開・利用拡大につなげる",
+    "currentState": "グローバルUX検証と多言語対応の初期フェーズ。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-3",
+    "needsContext": true
+  },
+  {
+    "project": "RealValue App",
+    "active": true,
+    "goal": "RealValueのバリュエーション算出ロジックと金融データ連携を検証し公開につなげる",
+    "currentState": "ロジック検証フェーズ。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-4",
+    "needsContext": true
+  },
+  {
+    "project": "BizSim",
+    "active": true,
+    "goal": "BizSimのコア体験を固め、公開・成長につなげる",
+    "currentState": "初期フェーズ。コア体験の定義・優先順位付けが必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-pm-bizsim",
+    "needsContext": true
+  },
+  {
+    "project": "x-to-issue",
+    "active": true,
+    "goal": "x-to-issueのコア機能を固め、公開につなげる",
+    "currentState": "初期フェーズ。コア機能の定義が必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-pm-xtoissue",
+    "needsContext": true
+  },
+  {
+    "project": "JIGGY BEATS サイト",
+    "active": true,
+    "goal": "JIGGY BEATSサイトを整備し、集客・コンバージョンを前進させる",
+    "currentState": "サイト整備フェーズ。現状の構成・流入の把握が必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-pm-jiggy-site",
+    "needsContext": true
+  },
+  {
+    "project": "AIマーケ（秘匿事業）",
+    "active": true,
+    "goal": "AIマーケ事業の施策を企画・検証して成果を出す",
+    "currentState": "企画フェーズ。事業仮説と検証施策の整理が必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-1773292418821",
+    "needsContext": true
+  },
+  {
+    "project": "音楽事業（横断）",
+    "active": true,
+    "goal": "音楽事業全体(JIGGY BEATS等)のリリースとプロモーションを前進させる",
+    "currentState": "横断管理。各プロジェクトの棚卸しと優先順位付けが必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-dh-music",
+    "needsContext": true
+  },
+  {
+    "project": "個人事業（横断）",
+    "active": true,
+    "goal": "個人事業全体の各プロジェクトを棚卸しし、優先度順に前進させる",
+    "currentState": "横断管理。プロジェクト一覧と優先度の整理が必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-dh-personal",
+    "needsContext": true
+  },
+  {
+    "project": "目標管理",
+    "active": true,
+    "goal": "Yutaの目標・KPIを整理し進捗を可視化して前進を促す",
+    "currentState": "初期フェーズ。目標・KPIの一覧化が必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-1773292505845",
+    "needsContext": true
+  },
+  {
+    "project": "SNSマーケティング",
+    "active": true,
+    "goal": "SNSマーケの運用を回し、フォロワー/エンゲージメントを伸ばす",
+    "currentState": "運用設計フェーズ。対象アカウント・KPI・投稿方針の整理が必要。実数値・現状は未設定（後で肉付け）。",
+    "owner": "agent-1773292613280",
+    "needsContext": true
   }
 ]

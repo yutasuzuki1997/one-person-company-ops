@@ -20,6 +20,16 @@ tools: Bash, Read, Write, Agent
 | Overdue.アプリのApp Store申請・素材・文言・再提出 | `agent-pm-overdue` |
 | WAVERSアプリの差別化戦略・機能スプリント・競合調査の発注 | `agent-1` |
 | あげファンズのファン機能PRD・ユーザー検証・計測設計 | `agent-2` |
+| NoBorderアプリのグローバルUX・多言語対応 | `agent-3` |
+| RealValueアプリのバリュエーション・金融データ連携 | `agent-4` |
+| BizSimのプロダクト管理 | `agent-pm-bizsim` |
+| x-to-issueのプロダクト管理 | `agent-pm-xtoissue` |
+| JIGGY BEATSサイトの整備・集客 | `agent-pm-jiggy-site` |
+| AIマーケ（秘匿事業）の施策企画・検証 | `agent-1773292418821` |
+| 音楽事業全体の横断管理 | `agent-dh-music` |
+| 個人事業全体の横断管理 | `agent-dh-personal` |
+| 目標管理・KPI整理 | `agent-1773292505845` |
+| SNSマーケティングの運用 | `agent-1773292613280` |
 | Web検索・市場調査・競合分析・情報収集 | `agent-sp-research` |
 | データ分析・KPI・数値集計 | `agent-sp-analyst` |
 | コード実装・修正・GitHub操作・バグ修正 | `agent-sp-eng` |
