@@ -2922,13 +2922,21 @@ app.get('/api/cost/today', (req, res) => {
   const s = readAppSettings();
   const rate = s.usdJpyRate || 160;
   const date = req.query.date || costTracker.jstDate();
+  const overDaily = costTracker.isOverBudget(s.dailyBudgetJpy, rate);
+  const overMonthly = costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate);
   res.json({
     date,
+    month: costTracker.jstMonth(),
     costUsd: costTracker.getDailyCostUsd(date),
     costJpy: Math.round(costTracker.getDailyCostJpy(rate, date)),
+    monthCostUsd: costTracker.getMonthlyCostUsd(),
+    monthCostJpy: Math.round(costTracker.getMonthlyCostJpy(rate)),
     breakdown: costTracker.getDailyBreakdown(date),
     dailyBudgetJpy: s.dailyBudgetJpy || 0,
-    overBudget: costTracker.isOverBudget(s.dailyBudgetJpy, rate),
+    monthlyBudgetJpy: s.monthlyBudgetJpy || 0,
+    overBudget: overDaily || overMonthly,
+    overDailyBudget: overDaily,
+    overMonthlyBudget: overMonthly,
     usdJpyRate: rate,
   });
 });
@@ -4059,11 +4067,19 @@ async function runGoalDrivenAdvance(companyId) {
   const s = readAppSettings();
   if (!(s.anthropicApiKey || '').trim()) return;
 
-  // コストガード
-  if (costTracker.isOverBudget(s.dailyBudgetJpy, s.usdJpyRate || 160)) {
-    console.log('[goal-advance] コスト上限到達 - 自走停止');
-    broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `本日のコスト上限(¥${s.dailyBudgetJpy})に達したため自走を停止しました` });
-    return;
+  // コストガード(日次 or 月次の上限)
+  {
+    const rate = s.usdJpyRate || 160;
+    if (costTracker.isOverBudget(s.dailyBudgetJpy, rate)) {
+      console.log('[goal-advance] 日次コスト上限到達 - 自走停止');
+      broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `本日のコスト上限(¥${s.dailyBudgetJpy})に達したため自走を停止しました` });
+      return;
+    }
+    if (costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate)) {
+      console.log('[goal-advance] 月次コスト上限到達 - 自走停止');
+      broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `今月のコスト上限(¥${s.monthlyBudgetJpy})に達したため自走を停止しました` });
+      return;
+    }
   }
   // レート制限
   const now = Date.now();
@@ -4136,9 +4152,11 @@ async function runAutonomousTask() {
 
     // コスト上限を超えていれば自走系の処理をスキップ(手動チャットは止めない)
     const s = readAppSettings();
-    if (costTracker.isOverBudget(s.dailyBudgetJpy, s.usdJpyRate || 160)) {
+    const rate = s.usdJpyRate || 160;
+    if (costTracker.isOverBudget(s.dailyBudgetJpy, rate) || costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate)) {
+      const limit = costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate) ? `今月の上限(¥${s.monthlyBudgetJpy})` : `本日の上限(¥${s.dailyBudgetJpy})`;
       console.log('[autonomous] コスト上限到達 - 自走チェックをスキップ');
-      broadcastToCompany(company.id, { type: 'notification', level: 'warning', message: `本日のコスト上限(¥${s.dailyBudgetJpy})に達したため自走を停止しました` });
+      broadcastToCompany(company.id, { type: 'notification', level: 'warning', message: `${limit}に達したため自走を停止しました` });
       return;
     }
 
