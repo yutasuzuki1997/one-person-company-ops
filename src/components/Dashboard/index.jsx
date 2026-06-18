@@ -513,11 +513,12 @@ function CostBadge() {
   }, []);
   if (!cost) return null;
   const over = cost.overBudget;
+  const todayJpy = Math.round(cost.costJpy || 0).toLocaleString();
   const monthJpy = Math.round(cost.monthCostJpy || 0).toLocaleString();
-  const budget = cost.monthlyBudgetJpy ? ` / ¥${cost.monthlyBudgetJpy.toLocaleString()}` : '';
+  const dailyCap = cost.dailyBudgetJpy ? ` / ¥${cost.dailyBudgetJpy.toLocaleString()}` : '';
   return (
     <span
-      title={`今月のAIコスト $${(cost.monthCostUsd || 0).toFixed(2)}（本日 ¥${Math.round(cost.costJpy || 0).toLocaleString()}）${cost.monthlyBudgetJpy ? ` ／ 月上限 ¥${cost.monthlyBudgetJpy.toLocaleString()}` : '（上限未設定）'}`}
+      title={`本日 $${(cost.costUsd || 0).toFixed(2)} / 今月 $${(cost.monthCostUsd || 0).toFixed(2)}${cost.dailyBudgetJpy ? ` ／ 日上限 ¥${cost.dailyBudgetJpy.toLocaleString()}` : '（上限未設定）'}`}
       style={{
         fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
         color: over ? '#fca5a5' : '#7dd3fc',
@@ -526,7 +527,7 @@ function CostBadge() {
         fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
       }}
     >
-      今月 ¥{monthJpy}{budget}{over ? ' ⚠上限' : ''}
+      本日 ¥{todayJpy}{dailyCap} ・ 今月 ¥{monthJpy}{over ? ' ⚠上限' : ''}
     </span>
   );
 }
