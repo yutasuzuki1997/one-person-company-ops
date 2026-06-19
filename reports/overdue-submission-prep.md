@@ -12,6 +12,18 @@
 
 ---
 
+## 進捗（2026-06-19 更新）
+
+本番リポジトリ `~/projects/PJ_Overdue` で着手・実施済み：
+- ✅ **B. Privacy Manifest**: 本体＋ウィジェットに `PrivacyInfo.xcprivacy` 作成・登録（UserDefaults=CA92.1, Tracking無）。実機ビルドで同梱を実証（BUILD SUCCEEDED）。→ ITMS-91053リスク解消
+- ✅ **B. 第三者SDK**: SDK皆無を確認（manifest同梱不要）
+- ✅ **B/5.1.1 ATT**: 広告・トラッキング・解析SDK無し → ATT不要。App Privacyは「Data Not Collected」で申告可
+- ✅ **C. プレースホルダ走査**: Coming soon/ダミー/TODO 検出ゼロ
+- ✅ **A. 差別化文言**: ドラフト作成 → `reports/overdue-43-differentiation.md`（名称/サブタイトル/説明/キーワードja+en、反論テンプレ含む）
+- ⬜ 残: App Store Connectで App Privacy=「Data Not Collected」設定、スクショ刷新（独自要素を可視化）、メタデータ反映、再提出
+
+---
+
 ## A. Guideline 4.3（類似アプリ飽和）★最優先
 
 「やり残し（Overdue）可視化」という独自コンセプトを、機能・名称・ストア表現の3層で言語化する。
