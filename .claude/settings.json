@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd ~/one-person-company-ops-yuta && npm run build 2>&1 | grep -E '^.*error' | head -5 || true"
+            "command": "cd ~/one-person-company-ops && npm run build 2>&1 | grep -E '^.*error' | head -5 || true"
           }
         ]
       }

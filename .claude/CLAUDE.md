@@ -38,7 +38,7 @@ UI broadcast / tasks.json / コスト記録 / 承認キューに反映する。�
 
 ## 起動方法
 ```bash
-cd ~/one-person-company-ops-yuta
+cd ~/one-person-company-ops
 lsof -ti:3000 | xargs kill -9 2>/dev/null
 npm run desktop  # 開発版起動
 npm run dist:mac # インストール版ビルド
@@ -50,7 +50,7 @@ npm run dist:mac # インストール版ビルド
 
 ## 作業前に必ず読むこと
 ```bash
-cat .claude/skills/onecompanyops-dev.md
+cat .claude/skills/onecompanyops-dev/SKILL.md
 ```
 
 ## Plan Modeを使うべき場面（Boris Tip 1）
