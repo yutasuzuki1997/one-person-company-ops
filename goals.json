@@ -3,14 +3,14 @@
     "project": "Overdue.",
     "active": true,
     "goal": "Overdue.(iPhone習慣化アプリ)をApp Store審査通過・公開まで到達させる",
-    "currentState": "審査・申請素材の整備フェーズ。リジェクト理由の洗い出しと申請文言・スクショ要件の準備が必要。",
+    "currentState": "実作業(申請素材整備)フェーズ。リジェクト調査は完了(reports/appstore-rejection-overdue.md)。次は reports/overdue-submission-prep.md のチェックリストに沿って、Privacy Manifest整備→差別化文言・独自機能ドキュメント→実機QA・スクショの順で素材を作る。",
     "owner": "agent-pm-overdue"
   },
   {
     "project": "WAVERS",
     "active": true,
     "goal": "WAVERSの差別化戦略を固め、機能スプリントを前進させてApp Store公開・初期成長につなげる",
-    "currentState": "競合調査と差別化ポイントの整理フェーズ。主要競合の機能比較と、次スプリントで作る差別化機能の優先順位付けが必要。",
+    "currentState": "競合調査は完了(reports/wavers-competitive-analysis-2026-04.md)。次は同レポートの差別化示唆(スポーツ特化/中間価格帯×高機能/参加型体験/日本特化UX等)を、次スプリントで作る差別化機能として優先順位付けする段階。調査の再実施は不要。",
     "owner": "agent-1"
   },
   {

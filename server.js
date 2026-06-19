@@ -1622,6 +1622,26 @@ app.post('/api/secretary/message', async (req, res) => {
     if (duplicateTask) {
       // 同名タスクが存在する場合はそのタスクに追記
       newTaskId = duplicateTask.id;
+      // 再発防止: 完了済み(review)/進行中(active)の重複再投入は、空振り再実行を避けて状況を返す。
+      // (同一依頼が何度も投げ込まれ、毎回新規委託される/逆に無応答になる事故を防ぐ)
+      const prevStatus = duplicateTask.status;
+      const refTs = duplicateTask.updatedAt || duplicateTask.createdAt;
+      const ageMs = refTs ? (Date.now() - new Date(refTs).getTime()) : Infinity;
+      const STALE_MS = 30 * 60 * 1000; // 30分以内は「直近」とみなす
+      if ((prevStatus === 'review' || prevStatus === 'active') && ageMs < STALE_MS) {
+        duplicateTask.updatedAt = new Date().toISOString();
+        saveTasksFile(existingTasks);
+        saveTaskMessage(newTaskId, { role: 'user', content: text, timestamp: new Date().toISOString() });
+        broadcastToCompany(companyId, { type: 'task_updated', task: duplicateTask });
+        const dupMsg = prevStatus === 'review'
+          ? `「${duplicateTask.name}」は既に完了し、確認待ちです。最新の結果をご確認ください。再実行が必要な場合は「再実行」とお伝えください。`
+          : `「${duplicateTask.name}」は現在進行中です（約${Math.max(1, Math.round(ageMs / 60000))}分前に着手）。完了までお待ちください。`;
+        sendSSE({ type: 'token', content: dupMsg });
+        sendSSE({ type: 'done' });
+        res.end();
+        return;
+      }
+      // 失効 or エラー or 完了から時間が経過 → 再実行を許可
       duplicateTask.status = 'active';
       duplicateTask.updatedAt = new Date().toISOString();
       saveTasksFile(existingTasks);
@@ -4088,7 +4108,12 @@ async function runGoalDrivenAdvance(companyId) {
   // ゴール読み込み
   let goals = [];
   try { goals = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goals.json'), 'utf-8')); } catch { return; }
-  const active = (Array.isArray(goals) ? goals : []).filter(g => g && g.active !== false && g.goal);
+  // 再発防止(active過多): needsContext=true(現状未設定のプレースホルダ)は自走対象から除外。
+  // コンテキストを肉付けして needsContext を外せば自動的に自走対象へ戻る。
+  const allWithGoal = (Array.isArray(goals) ? goals : []).filter(g => g && g.active !== false && g.goal);
+  const active = allWithGoal.filter(g => g.needsContext !== true);
+  const skipped = allWithGoal.length - active.length;
+  if (skipped > 0) console.log(`[goal-advance] needsContext未設定の${skipped}件を自走対象から除外`);
   if (active.length === 0) return;
 
   // 秘書セッションが必要(ネイティブAgent委託のため)
@@ -4101,7 +4126,7 @@ async function runGoalDrivenAdvance(companyId) {
   // 複数事業をラウンドロビンで前進（毎回1事業ずつ）
   const g = active[goalRotationIndex % active.length];
   goalRotationIndex = (goalRotationIndex + 1) % active.length;
-  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズ(実作業・素材作成・実装)へ進めること。作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project);
   agentTeamsManager.sendToJenny(instruction, companyId);
 }
