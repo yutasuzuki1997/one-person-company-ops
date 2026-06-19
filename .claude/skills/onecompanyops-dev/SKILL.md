@@ -1,3 +1,8 @@
+---
+name: onecompanyops-dev
+description: OneCompanyOpsの開発作業を行う際の規約・原則・ワークフロー。エージェント実装、トークン最適化、リモート環境へのアップ、実装後の確認方法を含む。OneCompanyOpsリポジトリで作業する際に使用。
+---
+
 # OneCompanyOps 開発スキル（Boris Cherny 30 Tips完全適用版）
 
 ## このプロジェクトの目的と設計思想
