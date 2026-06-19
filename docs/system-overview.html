@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OneCompanyOps システム実態と理想差分レポート</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --line:#2a2f3a;
+    --tx:#e6e8ec; --tx2:#a7adba; --tx3:#6f7686;
+    --ok:#3fb950; --warn:#d29922; --ng:#f85149; --accent:#58a6ff; --accent2:#bc8cff;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--tx);
+    font-family:-apple-system,"Hiragino Sans","Noto Sans JP",system-ui,sans-serif;
+    line-height:1.85;font-feature-settings:"palt" 1;letter-spacing:.01em;
+  }
+  .wrap{max-width:980px;margin:0 auto;padding:56px 28px 120px}
+  header.hero{border-bottom:1px solid var(--line);padding-bottom:32px;margin-bottom:40px}
+  .kicker{color:var(--accent2);font-size:13px;letter-spacing:.18em;font-weight:700;margin:0 0 10px}
+  h1{font-size:30px;line-height:1.45;margin:0 0 14px;font-weight:800}
+  .sub{color:var(--tx2);font-size:15px;margin:0}
+  .meta{color:var(--tx3);font-size:12.5px;margin-top:16px;font-family:var(--mono)}
+  h2{font-size:21px;margin:64px 0 18px;padding-top:18px;border-top:1px solid var(--line);font-weight:800}
+  h2 .n{color:var(--accent);font-family:var(--mono);font-size:15px;margin-right:10px}
+  h3{font-size:16px;margin:30px 0 10px;color:#fff;font-weight:700}
+  p{margin:12px 0;color:var(--tx)}
+  .lead{font-size:16px;background:var(--panel);border-left:3px solid var(--accent);padding:16px 20px;border-radius:0 8px 8px 0;margin:18px 0}
+  .verdict{font-size:17px;font-weight:700}
+  ul,ol{padding-left:22px;margin:12px 0}
+  li{margin:7px 0}
+  code{font-family:var(--mono);font-size:12.5px;background:#0b0d11;border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:#cdd3de}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 9px;border-radius:99px;vertical-align:middle}
+  .t-ok{background:rgba(63,185,80,.15);color:var(--ok);border:1px solid rgba(63,185,80,.35)}
+  .t-part{background:rgba(210,153,34,.15);color:var(--warn);border:1px solid rgba(210,153,34,.35)}
+  .t-ng{background:rgba(248,81,73,.15);color:var(--ng);border:1px solid rgba(248,81,73,.35)}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--tx2);font-weight:700;font-size:12px;letter-spacing:.04em;background:var(--panel)}
+  td code{font-size:11.5px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .vs{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+  .vs h4{margin:0 0 10px;font-size:14px}
+  .flow{font-family:var(--mono);font-size:12.5px;background:#0b0d11;border:1px solid var(--line);border-radius:10px;padding:18px 20px;color:#cdd3de;overflow-x:auto;line-height:1.7}
+  .flow .c{color:var(--tx3)}
+  .flow .a{color:var(--accent)}
+  .flow .g{color:var(--accent2)}
+  .flow .ok{color:var(--ok)}
+  .flow .ng{color:var(--ng)}
+  .gap{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:14px 0}
+  .gap>div{padding:14px 18px}
+  .gap .ideal{background:rgba(88,166,255,.07);border-right:1px solid var(--line)}
+  .gap .real{background:rgba(248,81,73,.05)}
+  .gap h5{margin:0 0 6px;font-size:12px;letter-spacing:.06em;color:var(--tx3)}
+  @media(max-width:760px){.gap{grid-template-columns:1fr}.gap .ideal{border-right:none;border-bottom:1px solid var(--line)}}
+  .pill{font-family:var(--mono);font-size:11px;color:var(--tx3)}
+  .big{font-size:40px;font-weight:800;line-height:1;margin:6px 0}
+  .big.ok{color:var(--ok)} .big.warn{color:var(--warn)} .big.ng{color:var(--ng)}
+  .statgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0}
+  @media(max-width:760px){.statgrid{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;text-align:center}
+  .stat .lbl{font-size:11.5px;color:var(--tx3);margin-top:4px}
+  .prio{display:flex;gap:14px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:12px 0}
+  .prio .num{font-family:var(--mono);font-weight:800;font-size:22px;color:var(--accent);min-width:36px}
+  .prio .body{flex:1}
+  .prio h4{margin:0 0 4px;font-size:15px}
+  .prio p{margin:4px 0;font-size:13.5px;color:var(--tx2)}
+  .eff{font-family:var(--mono);font-size:11px;color:var(--tx3);white-space:nowrap}
+  .note{font-size:12.5px;color:var(--tx3);border-top:1px dashed var(--line);margin-top:10px;padding-top:8px}
+  hr{border:none;border-top:1px solid var(--line);margin:40px 0}
+  .legend{font-size:12px;color:var(--tx3);margin:6px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <p class="kicker">INTERNAL ASSESSMENT</p>
+  <h1>OneCompanyOps は「AI会社」として本当に機能するのか<br>— 実装の実態・コスト構造・理想とのギャップ</h1>
+  <p class="sub">秘書ジェニーが複数エージェントを動かし、複数プロジェクトを自走で前に進める。その設計思想は実装にどこまで届いているか。ターミナルで複数の Claude Code を回すのと何が違うのか。コードを精査した正直な評価です。</p>
+  <p class="meta">対象: /Users/ysuzuki_workpc/one-person-company-ops &nbsp;/&nbsp; 評価日: 2026-06-16 &nbsp;/&nbsp; 評価方法: ソースコード精読（server.js, lib/*, .claude/agents/*, agents.json）</p>
+</header>
+
+<!-- ===================== 結論 ===================== -->
+<section>
+  <div class="lead">
+    <p class="verdict" style="margin-top:0">結論：骨格はある。だが「指示なしでガンガン進む会社」にはまだ遠い。<br>現状は <span style="color:var(--warn)">“半自動の委託エンジン＋定時見回り”</span> であり、<span style="color:var(--accent2)">“自律的に意思決定して進める組織”</span> ではない。</p>
+    <p style="margin-bottom:0">最大の問題は機能の有無ではなく、<strong>二重実装の未完成・コスト不可視・承認導線の不在・実エージェント8体のみ</strong>という4点。これらが「使えなくて止めた」体感の正体です。</p>
+  </div>
+
+  <div class="statgrid">
+    <div class="stat"><div class="big warn">2系統</div><div class="lbl">実行エンジンが二重化<br>(CLI起動 / API直叩き)</div></div>
+    <div class="stat"><div class="big ng">8 / 30</div><div class="lbl">本物のプロセスとして<br>起動できるエージェント数</div></div>
+    <div class="stat"><div class="big ng">¥0 可視化</div><div class="lbl">トークン/コスト追跡<br>＝完全に未実装</div></div>
+    <div class="stat"><div class="big ng">承認導線<br>なし</div><div class="lbl">「大事なことだけ聞きに来る」<br>仕組みが存在しない</div></div>
+  </div>
+</section>
+
+<!-- ===================== 1. これは何のシステムか ===================== -->
+<h2><span class="n">01</span>これは結局、何のシステムなのか</h2>
+
+<p>一言でいうと <strong>「Electron デスクトップアプリ＋Node サーバー（server.js）が、複数の Claude エージェントを階層構造で動かすオーケストレーター」</strong> です。Yuta の指示は必ず<strong>統括秘書ジェニー</strong>が受け、配下に委託します。</p>
+
+<h3>階層モデル（agents.json / company-registry.js）</h3>
+<div class="flow">
+<span class="c">Yuta（あなた）</span>
+   │ 指示はすべてここへ
+   ▼
+<span class="a">L0  ジェニー（統括秘書）</span>            … 分類・委託・報告集約
+   ▼ DELEGATE / SPAWN_TEAMMATE
+<span class="a">L1  事業部長 / PdM補佐</span>  ティアラ・ハル・リオ ほか
+   ▼
+<span class="a">L2  PM補佐</span>          トム(Overdue.)・ナギ・コウ・ユキ ほか
+   ▼
+<span class="a">L3  専門担当</span>        レン(調査)・ノーラ(法務)・フィン(財務)・ソフィア(デザイン) ほか
+</div>
+<p class="legend">agents.json には計30体が定義され、各々ロール・担当プロジェクト・階層レベルを持つ。階層は <code>getAgentHierarchyLevel()</code>（company-registry.js:302）がロール名から自動判定。</p>
+
+<h3>2つの実行モード（ここが要注意）</h3>
+<p>同じ「委託」でも、内部では<strong>まったく別物の2系統</strong>が走ります。これが本システムを理解する最重要ポイントです。</p>
+
+<div class="grid2">
+  <div class="vs">
+    <h4>① AgentTeamsManager <span class="tag t-part">移行途上</span></h4>
+    <p style="font-size:13.5px;color:var(--tx2)"><code>spawn('claude', …)</code> で<strong>本物の Claude Code CLI を別プロセスで起動</strong>。<code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code>。ジェニーが <code>SPAWN_TEAMMATE</code> を出すと配下を子プロセスとして立ち上げ、stdin/stdout の JSON ストリームで連携。</p>
+    <p style="font-size:13px;color:var(--tx3)">→ これが実現すれば「30個のターミナル Claude Code を秘書が統率する」に近い。<strong>ただし実体ファイル <code>.claude/agents/*.md</code> は8体分しかない</strong>(jenny/jesse/kai/len/luca/ren/tiara/tom)。残り22体はこのモードで起動できない。</p>
+  </div>
+  <div class="vs">
+    <h4>② AgentExecutor <span class="tag t-part">フォールバック</span></h4>
+    <p style="font-size:13.5px;color:var(--tx2)">ジェニーが居ないとき用。<strong>Anthropic API を直接 fetch</strong> し、<code>###DELEGATE###</code> ブロックを正規表現で拾って同一プロセス内で <code>execute()</code> を<strong>再帰呼び出し</strong>（agent-executor.js:181）。深さ6で停止。</p>
+    <p style="font-size:13px;color:var(--tx3)">→ 各段は単発の LLM 補完にすぎず、<strong>ツールはほぼ web_search のみ</strong>。実態は「プロンプト上のロールプレイ」に近く、ファイル操作や本格的なエージェントループは持たない。</p>
+  </div>
+</div>
+
+<p class="note">CLAUDE.md が重要ファイルとして挙げる <code>lib/claude-code-executor.js</code> / <code>lib/task-list.js</code> / <code>lib/agent-mailbox.js</code> は<strong>いずれも実在しません</strong>。タスク状態は <code>tasks.json</code> への同期書き込み、エージェント間通知は WebSocket ブロードキャストで代替。＝<strong>ドキュメントと実装が乖離</strong>しており、設計が途中で組み替わった痕跡です。</p>
+
+<!-- ===================== 2. 自走するのか ===================== -->
+<h2><span class="n">02</span>「指示なしで勝手に進む」はどこまで本当か</h2>
+
+<table>
+<tr><th>能動性の種類</th><th>実装</th><th>中身</th></tr>
+<tr><td>毎朝9時ブリーフィング</td><td><span class="tag t-ok">あり</span></td><td><code>scheduleDaily()</code>。昨日のログ+ルーティンを集めジェニーが自動で要約発火</td></tr>
+<tr><td>1時間ごとの見回り</td><td><span class="tag t-ok">あり</span></td><td><code>runAutonomousCheck()</code>。停滞エージェント/タスク/プロジェクトを検知し再確認を投げる</td></tr>
+<tr><td>停滞検知（48hルール）</td><td><span class="tag t-ok">あり</span></td><td>更新が48h止まったタスクを担当へ自動リマインド</td></tr>
+<tr><td>繰り返しパターン→Skill自動生成</td><td><span class="tag t-ok">あり</span></td><td>同一作業3回でSkill化を提案（skills-generator.js）</td></tr>
+<tr><td>タスク完了→次アクション提案</td><td><span class="tag t-ok">あり</span></td><td><code>###COMPLETED###</code> 検知→「次の一手」を1行提案</td></tr>
+<tr><td>gitコミット検知→次提案</td><td><span class="tag t-ng">なし</span></td><td>git連携は30分ごとの自動push(git-autosync.js)のみ。コミットをトリガーにした能動行動は無し</td></tr>
+<tr><td>目標から逆算した自律的な計画実行</td><td><span class="tag t-ng">なし</span></td><td>これが核心。下記参照</td></tr>
+</table>
+
+<div class="card">
+<p style="margin-top:0"><strong>厳しい現実：「能動性」の正体は “定時の見回りと小突き” です。</strong></p>
+<p>実装されている自走は <span style="color:var(--warn)">「止まっているものを見つけて『どうなってる?』と聞く」</span> レベル。<strong>「このプロジェクトを完成させるために、次は◯◯が必要だから自分で着手する」という目標駆動の計画→実行ループは存在しません。</strong> 停滞を検知しても、やることは“担当への確認メッセージ生成”であって、担当が実際に手を動かして成果物を出し切る保証はない。つまり <em>進捗を監視する仕組みはあるが、進捗を生む仕組みが弱い</em>。</p>
+</div>
+
+<!-- ===================== 3. ターミナルとの違い ===================== -->
+<h2><span class="n">03</span>ターミナルで複数の Claude Code を回すのと何が違うのか</h2>
+
+<p>これは一番大事な問いです。正直に答えると——<strong>「弱いモード(②API直叩き)で動いている限り、ターミナルの素の Claude Code の方が有能」</strong>です。理由を整理します。</p>
+
+<div class="grid2">
+  <div class="vs">
+    <h4 style="color:var(--ok)">OneCompanyOps が “足している” もの</h4>
+    <ul style="font-size:13.5px;margin:0">
+      <li><strong>永続状態</strong>：tasks.json / workspace-memory にプロジェクト記憶が残る（ターミナルは閉じれば消える）</li>
+      <li><strong>定時自走</strong>：朝9時・毎時の自動起動（人間が叩かなくても動く）</li>
+      <li><strong>役割と階層</strong>：30体のロール定義・担当割り当て・報告ルート</li>
+      <li><strong>UI と通知</strong>：進捗の可視化、WebSocket ブロードキャスト</li>
+      <li><strong>マルチプロバイダ</strong>：軽い処理を Gemini に逃がしてコスト削減</li>
+      <li><strong>GitHub連携</strong>：リポジトリ読取・PR作成（要token）</li>
+    </ul>
+  </div>
+  <div class="vs">
+    <h4 style="color:var(--ng)">素のターミナル Claude Code の方が強い点</h4>
+    <ul style="font-size:13.5px;margin:0">
+      <li><strong>本物のエージェントループ</strong>：ファイル編集・bash・検索・MCPを自律的に何十手も回す</li>
+      <li><strong>フルツールアクセス</strong>：②API直叩きモードは <code>web_search</code> 程度しか持たない</li>
+      <li><strong>MCP が全部使える</strong>：Notion/Drive/Gmail等（後述、本システムのエージェントからは呼べない）</li>
+      <li><strong>柔軟性</strong>：固定階層に縛られず、状況に応じて自分で手段を選ぶ</li>
+      <li><strong>枯れている</strong>：自作オーケストレーション特有のバグが無い</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+<p style="margin-top:0"><strong>差別化の本命は①(AgentTeamsManager)＝「本物の Claude Code を秘書が束ねる」モードにしかない。</strong></p>
+<p>①が全エージェント分そろえば、「Yutaが秘書に一言 → 秘書が適切な部署の Claude Code プロセスを起動 → 各自がフルツールで実作業 → 秘書に報告集約」という、<strong>ターミナルを30枚開いて手動で振り分ける作業を自動化した状態</strong>になります。これこそが「ターミナルとの違い」の答え。<br>
+ところが現状、実体ファイルは<strong>8体分のみ</strong>。残りはagents.jsonに名前があるだけで①では起動せず②に落ちる。＝<strong>差別化の心臓部が3割しか組み上がっていない。</strong></p>
+</div>
+
+<!-- ===================== 4. 柔軟性 ===================== -->
+<h2><span class="n">04</span>柔軟性 — gitを読む・ネット検索・最適解を探す力</h2>
+
+<table>
+<tr><th>能力</th><th>状態</th><th>実態</th></tr>
+<tr><td>Gitリポジトリ/コード読取</td><td><span class="tag t-ok">使える</span></td><td>github-connector.js + workspace-manager.js で clone・読取・PR。<strong>ただし repoPath と token 設定済みプロジェクトのみ</strong></td></tr>
+<tr><td>Web検索</td><td><span class="tag t-part">条件付き</span></td><td>Anthropic <code>web_search_20250305</code>。<strong>ロール名に「リサーチ/調査/analyst」を含むエージェントだけ</strong>付与。全員は使えない</td></tr>
+<tr><td>MCP連携(Notion/Sheets/Calendar)</td><td><span class="tag t-part">設定のみ</span></td><td>コネクタは実装済みだが <strong>UI/手動API経由でしか動かず、エージェントが自分の判断で呼ぶ導線がない</strong></td></tr>
+<tr><td>MCP連携(Gmail/Drive)</td><td><span class="tag t-ng">未実装</span></td><td>package.json に名前があるだけ。実装ファイルなし</td></tr>
+<tr><td>タスク重さの自動判定</td><td><span class="tag t-ok">使える</span></td><td>task-classifier.js が instant/light/heavy/complex を判定→モデル自動選択</td></tr>
+<tr><td>「自分で手段を選び最適解を探す」</td><td><span class="tag t-ng">弱い</span></td><td>②モードは固定階層＆事前割当ツールのみ。<strong>“このタスクには検索が要る”と自己判断してツールを選ぶ裁量がない</strong>。①モードなら素のClaude Code並に柔軟だが、前述の8体制約</td></tr>
+</table>
+
+<p>つまり柔軟性は <strong>「①モードのエージェント＝高い / ②モードのエージェント＝低い」</strong> と二極化しています。「git読んで・ネット調べて・最適解を探す」は、①で起動できる8体なら可能、②に落ちる22体ではほぼ不可、というのが正確な姿です。</p>
+
+<!-- ===================== 5. コスト構造 ===================== -->
+<h2><span class="n">05</span>コスト構造 — どこで課金が膨らむか</h2>
+
+<h3>モデルルーティング（llm-router.js）</h3>
+<table>
+<tr><th>タスク種別</th><th>使用モデル</th><th>狙い</th></tr>
+<tr><td>classify / title / instant（挨拶・分類）</td><td>Gemini 2.0 Flash</td><td>激安・高速で雑処理を捌く</td></tr>
+<tr><td>briefing / light（軽い調査）</td><td>Gemini 1.5 Pro（無ければHaiku）</td><td>中量級を安く</td></tr>
+<tr><td>heavy / complex / secretary / agent</td><td><strong>Claude Sonnet 4</strong></td><td>委託・実作業はSonnet固定</td></tr>
+</table>
+<p class="legend">設計思想は良い：<strong>軽い処理を Gemini に逃がして Anthropic 課金を節約</strong>している。ただし Gemini/OpenAI キーは app-settings.json の手動編集が必要でUI未整備。</p>
+
+<h3>コストが膨らむ構造</h3>
+<div class="flow">
+Yuta「タスクXやって」
+ ├ <span class="g">Gemini</span>  分類(classify)        … 安
+ ├ <span class="g">Gemini</span>  曖昧性チェック         … 安
+ ├ <span class="ng">Sonnet</span> ジェニー: 部長を特定・委託
+ │   └ <span class="ng">Sonnet</span> 部長: PM/担当へ再委託
+ │        └ <span class="ng">Sonnet</span> PM: 担当へ分配
+ │             └ <span class="ng">Sonnet</span> 担当: 実行
+ └ + 各段の報告(DIVISION_REPORT / COMPLETED)解析
+
+<span class="ng">→ 単純な1タスクでも Sonnet が最低3〜4回発火</span>
+</div>
+
+<div class="card" style="border-color:rgba(248,81,73,.4)">
+<p style="margin-top:0"><strong class="t-ng" style="font-size:14px">最大の欠陥：トークン/コスト追跡が完全に未実装。</strong></p>
+<p>API レスポンスに <code>usage:{input_tokens,output_tokens}</code> が返っているのに <strong>一切記録していない</strong>（anthropic-stream.js）。月いくら使ったか、どのエージェントが高いか、暴走で課金が爆発していないか——<strong>誰にも見えない</strong>。「ガンガン進める」を本気でやるなら、自走ループ×階層委託×Sonnet多発で課金は容易に膨らむ。<strong>可視化と上限設定なしに自走を強めるのは危険</strong>です。これも「使うのが怖い/止めた」要因になり得ます。</p>
+</div>
+
+<!-- ===================== 6. 理想とのギャップ ===================== -->
+<h2><span class="n">06</span>理想状態とのギャップ</h2>
+<p class="lead" style="border-color:var(--accent2)">理想：「有能な秘書の下に会社のような各部署があり、すべて勝手に進み、大事なことだけ承認・意思決定を聞きに来る」</p>
+
+<div class="gap">
+  <div class="ideal"><h5>理想</h5>秘書が会社全体の状態を把握し、各部署が<strong>目標から逆算して自分で計画→実行→完成</strong>まで持っていく</div>
+  <div class="real"><h5>現状 <span class="tag t-part">差大</span></h5>秘書は<strong>来た指示を振り分ける</strong>のが主。各部署は<strong>振られた単発タスクを1回処理</strong>するだけで、完成まで自走する計画ループがない</div>
+</div>
+<div class="gap">
+  <div class="ideal"><h5>理想</h5>進捗が止まったら<strong>自分で原因を解消して前に進める</strong></div>
+  <div class="real"><h5>現状 <span class="tag t-part">差中</span></h5>停滞は<strong>検知できるが、やるのは「確認メッセージ」止まり</strong>。解消は人/次の指示頼み</div>
+</div>
+<div class="gap">
+  <div class="ideal"><h5>理想</h5><strong>大事なことだけ</strong>承認・意思決定を求めてくる（重要度のフィルタリング）</div>
+  <div class="real"><h5>現状 <span class="tag t-ng">仕組みなし</span></h5><strong>承認待ち/意思決定待ちを構造化する導線が存在しない</strong>。通知ブロードキャストはあるが「これはYutaの判断が必要」を選り分けてキューに積む機構がない</div>
+</div>
+<div class="gap">
+  <div class="ideal"><h5>理想</h5>30の部署すべてがフルの実行能力で動く</div>
+  <div class="real"><h5>現状 <span class="tag t-ng">8/30</span></h5>本物プロセスで動けるのは8体。残りは弱い②モードに落ち、実作業能力が低い</div>
+</div>
+<div class="gap">
+  <div class="ideal"><h5>理想</h5>成果物の品質を担保して報告（信頼できる）</div>
+  <div class="real"><h5>現状 <span class="tag t-part">弱い</span></h5>QA担当(クイン)は定義上いるが、<strong>成果物を検証してから完了にする品質ループが組み込まれていない</strong>。完了報告＝自己申告</div>
+</div>
+
+<!-- ===================== 7. 改善ロードマップ ===================== -->
+<h2><span class="n">07</span>どう改善すべきか（優先度順）</h2>
+<p>「理想」に寄せるための最短ルート。上から効きます。</p>
+
+<div class="prio">
+  <div class="num">1</div>
+  <div class="body">
+    <h4>実行モードを①(AgentTeamsManager)に一本化し、30体分の <code>.claude/agents/*.md</code> を揃える <span class="eff">［効果：特大 / 労力：中］</span></h4>
+    <p>これが差別化の心臓。②API直叩きは「弱いロールプレイ」なので、本物のClaude Codeプロセスで全員動かす。agents.jsonの定義から .md を自動生成するスクリプトを書けば一気に埋まる。これだけで「ターミナル30枚を秘書が束ねる」状態に到達する。</p>
+  </div>
+</div>
+<div class="prio">
+  <div class="num">2</div>
+  <div class="body">
+    <h4>コスト可視化＋月次上限ガードを実装 <span class="eff">［効果：大 / 労力：小］</span></h4>
+    <p>anthropic-stream.js で <code>usage</code> を拾って activity-logger に記録するだけ。エージェント別・日次のトークン/概算円を出し、上限超過で自走を自動停止。<strong>これが無いと安心して自走を強められない</strong>。最小労力で最大の安心。</p>
+  </div>
+</div>
+<div class="prio">
+  <div class="num">3</div>
+  <div class="body">
+    <h4>「承認・意思決定キュー」を新設 <span class="eff">［効果：大 / 労力：中］</span></h4>
+    <p>理想の核心「大事なことだけ聞きに来る」。エージェントが <code>###NEEDS_DECISION###</code> を出せる仕組みを作り、選択肢付きでYuta専用の承認インボックスに積む。Yutaは溜まった意思決定だけ捌けばよくなる。通知の垂れ流しを“承認待ち”に構造化する。</p>
+  </div>
+</div>
+<div class="prio">
+  <div class="num">4</div>
+  <div class="body">
+    <h4>“見回り”を“前進”に格上げ — 目標駆動の計画ループ <span class="eff">［効果：特大 / 労力：大］</span></h4>
+    <p>停滞検知時に「確認メッセージ」を出すのではなく、<strong>担当エージェントが「ゴール状態 vs 現状」を比較し、次の具体タスクを自分で生成して着手</strong>するループに。projects.md にゴール/完了条件を持たせ、毎時の自走でそこへ近づける差分を実行させる。これで初めて「勝手に進む」になる。</p>
+  </div>
+</div>
+<div class="prio">
+  <div class="num">5</div>
+  <div class="body">
+    <h4>完了前の品質ゲート（QAクインを実装フローに組み込む） <span class="eff">［効果：中 / 労力：中］</span></h4>
+    <p>担当が「完了」を出す前に、QA/レビュー担当が成果物を検証して合格して初めて <code>review</code>→<code>done</code>。自己申告完了をなくし、報告の信頼性を上げる。</p>
+  </div>
+</div>
+<div class="prio">
+  <div class="num">6</div>
+  <div class="body">
+    <h4>MCP（Notion/Calendar/Sheets/Drive/Gmail）をエージェントツールとして開放 <span class="eff">［効果：中 / 労力：中］</span></h4>
+    <p>①モードに寄せれば Claude Code 標準のMCP接続がそのまま使えるため、1とセットで進めると効率的。エージェントが自分でカレンダー確認・Notion更新・メール下書きまでできるようになる。</p>
+  </div>
+</div>
+
+<hr>
+<p style="color:var(--tx3);font-size:13px">補足：本レポートはコード静的解析に基づく。CLAUDE.md と実装の乖離（実在しないファイルの記載、30体定義 vs 8体実体）が複数確認されたため、まず <strong>「設計ドキュメントと実装の現状を一致させる棚卸し」</strong> を最初の一歩にすると、以降の改善判断がぶれません。</p>
+
+</div>
+</body>
+</html>

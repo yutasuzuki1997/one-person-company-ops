@@ -501,6 +501,37 @@ function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, i
   );
 }
 
+// 本日のAIコスト表示バッジ（/api/cost/today を60秒ごとにポーリング）
+function CostBadge() {
+  const [cost, setCost] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const fetchCost = () => fetch('/api/cost/today').then((r) => r.json()).then((d) => { if (alive) setCost(d); }).catch(() => {});
+    fetchCost();
+    const iv = setInterval(fetchCost, 60000);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+  if (!cost) return null;
+  const over = cost.overBudget;
+  const todayJpy = Math.round(cost.costJpy || 0).toLocaleString();
+  const monthJpy = Math.round(cost.monthCostJpy || 0).toLocaleString();
+  const dailyCap = cost.dailyBudgetJpy ? ` / ¥${cost.dailyBudgetJpy.toLocaleString()}` : '';
+  return (
+    <span
+      title={`本日 $${(cost.costUsd || 0).toFixed(2)} / 今月 $${(cost.monthCostUsd || 0).toFixed(2)}${cost.dailyBudgetJpy ? ` ／ 日上限 ¥${cost.dailyBudgetJpy.toLocaleString()}` : '（上限未設定）'}`}
+      style={{
+        fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+        color: over ? '#fca5a5' : '#7dd3fc',
+        background: over ? 'rgba(248,113,113,0.12)' : 'rgba(56,189,248,0.1)',
+        border: `1px solid ${over ? 'rgba(248,113,113,0.4)' : 'rgba(56,189,248,0.3)'}`,
+        fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+      }}
+    >
+      本日 ¥{todayJpy}{dailyCap} ・ 今月 ¥{monthJpy}{over ? ' ⚠上限' : ''}
+    </span>
+  );
+}
+
 // ジェニーチャットビュー（タスクとは別の会話画面）
 function JennyChatView({ messages, streamContent, onSendMessage, isSending }) {
   const bottomRef = useRef(null);
@@ -528,6 +559,8 @@ function JennyChatView({ messages, streamContent, onSendMessage, isSending }) {
             <span style={{ fontSize: 11, color: '#475569', marginLeft: 8 }}>統括秘書</span>
           </div>
           <span style={{ color: '#22c55e', fontSize: 8, marginLeft: 4 }}>●</span>
+          <span style={{ flex: 1 }} />
+          <CostBadge />
         </div>
       </div>
 

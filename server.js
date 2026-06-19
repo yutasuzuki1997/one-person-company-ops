@@ -22,6 +22,7 @@ const { getMemoryContext, saveCompletionToWorkspace, detectStaleProjects, ensure
 const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
 const { AgentExecutor, buildAgentSystemPrompt } = require('./lib/agent-executor');
 const { AgentTeamsManager } = require('./lib/agent-teams-manager');
+const costTracker = require('./lib/cost-tracker');
 let agentTeamsManager = null;
 const notion = require('./lib/notion-connector');
 const sheets = require('./lib/sheets-connector');
@@ -80,6 +81,7 @@ function stripMarkdown(text) {
 }
 
 const DATA_DIR = process.env.AI_AGENTS_DATA_DIR ? path.resolve(process.env.AI_AGENTS_DATA_DIR) : __dirname;
+costTracker.configure(DATA_DIR);
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -2915,6 +2917,30 @@ app.get('/api/activity-log', (req, res) => {
   res.json({ logs });
 });
 
+// ── コスト可視化 ─────────────────────────────────────────────────
+app.get('/api/cost/today', (req, res) => {
+  const s = readAppSettings();
+  const rate = s.usdJpyRate || 160;
+  const date = req.query.date || costTracker.jstDate();
+  const overDaily = costTracker.isOverBudget(s.dailyBudgetJpy, rate);
+  const overMonthly = costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate);
+  res.json({
+    date,
+    month: costTracker.jstMonth(),
+    costUsd: costTracker.getDailyCostUsd(date),
+    costJpy: Math.round(costTracker.getDailyCostJpy(rate, date)),
+    monthCostUsd: costTracker.getMonthlyCostUsd(),
+    monthCostJpy: Math.round(costTracker.getMonthlyCostJpy(rate)),
+    breakdown: costTracker.getDailyBreakdown(date),
+    dailyBudgetJpy: s.dailyBudgetJpy || 0,
+    monthlyBudgetJpy: s.monthlyBudgetJpy || 0,
+    overBudget: overDaily || overMonthly,
+    overDailyBudget: overDaily,
+    overMonthlyBudget: overMonthly,
+    usdJpyRate: rate,
+  });
+});
+
 // ── 確認待ち操作の承認・却下 ─────────────────────────────────────────────────
 
 app.post('/api/action/confirm', async (req, res) => {
@@ -2925,7 +2951,25 @@ app.post('/api/action/confirm', async (req, res) => {
   if (!pending) return res.status(404).json({ error: 'pending action not found or already processed' });
 
   pendingActions.delete(pendingId);
+  removeApprovalMirror(pendingId);
   const agent = pending.agentId ? reg.findAgentById(pending.agentId)?.agent : null;
+
+  // APPROVAL: 秘書セッションに承認/却下を注入して再開させる
+  if (pending.type === 'APPROVAL') {
+    const cid = pending.companyId || null;
+    const online = agentTeamsManager && agentTeamsManager.isJennyOnline();
+    if (approved) {
+      if (online) agentTeamsManager.sendToJenny(`承認されました: ${pending.summary}。承認が必要だった操作を実行して、結果を報告してください。`, cid);
+      const payload = { type: 'action_completed', pendingId, agentId: pending.agentId, summary: pending.summary };
+      if (cid) broadcastToCompany(cid, payload); else wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(payload)); });
+      return res.json({ ok: true, status: 'approved', resumed: !!online });
+    } else {
+      if (online) agentTeamsManager.sendToJenny(`却下されました: ${pending.summary}。この操作は実行せず、代替案を提示してください。`, cid);
+      const payload = { type: 'action_cancelled', pendingId, agentId: pending.agentId, summary: pending.summary };
+      if (cid) broadcastToCompany(cid, payload); else wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(payload)); });
+      return res.json({ ok: true, status: 'rejected', resumed: !!online });
+    }
+  }
 
   if (!approved) {
     // 却下
@@ -3370,13 +3414,22 @@ async function mainCli() {
     // Agent Teams Manager 起動
     const appSettings = readAppSettings();
     if (appSettings.anthropicApiKey) {
-      agentTeamsManager = new AgentTeamsManager(appSettings, (msg) => {
+      const broadcastAll = (msg) => {
         wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(msg)); });
+      };
+      let defaultCompanyId = null;
+      try { defaultCompanyId = (reg.listMeta()[0] || {}).id || null; } catch {}
+      agentTeamsManager = new AgentTeamsManager(appSettings, broadcastAll, {
+        companyId: defaultCompanyId,
+        onAgentCompletion: handleAgentCompletion,
+        onUsage: (rec) => { try { costTracker.recordUsage(rec); } catch (e) { console.error('[cost] recordUsage error:', e.message); } },
+        onApproval: (a) => enqueueApproval(a),
       });
       agentTeamsManager.startJenny().catch(e => console.error('[agent-teams] startJenny error:', e.message));
     } else {
       console.log('[agent-teams] APIキー未設定のためジェニー起動スキップ');
     }
+    try { restoreApprovals(); } catch (e) { console.error('[approval] restore error:', e.message); }
   } catch (e) {
     console.error(e);
     process.exit(1);
@@ -3750,7 +3803,7 @@ function saveTaskMessage(taskId, message) {
   }
 }
 
-async function handleAgentCompletion(companyId, agentId, agentName, summary, taskId, success) {
+async function handleAgentCompletion(companyId, agentId, agentName, summary, taskId, success, opts = {}) {
   // 完了報告は3行以内にコンパクト化
   const compactSummary = summary
     ? summary.split('\n').filter(l => l.trim()).slice(0, 3).join('\n')
@@ -3781,9 +3834,11 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
   broadcastToCompany(companyId, { type: 'agent_completed', agentId, agentName, message: completionMessage, taskId, success });
 
   // 4. ジェニーが能動的にYutaに報告
+  //    ネイティブAgent委託モードでは秘書セッション自身が完了後に報告テキストを出すため、
+  //    ここでの追加報告(Haiku)はスキップ(二重報告とコスト増を防ぐ)。
   try {
     const s = readAppSettings();
-    if (s.anthropicApiKey) {
+    if (!opts.fromNative && s.anthropicApiKey) {
       const reportResponse = await completeAnthropic({
         apiKey: s.anthropicApiKey, model: 'claude-haiku-4-5-20251001',
         system: '以下の完了報告を鈴木さんに3行以内で伝えてください。次のアクションを1行で提案してください。余計な挨拶・前置き不要。',
@@ -3812,6 +3867,43 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
       console.error('[memory] completion save error:', e.message);
     }
   }
+}
+
+// 承認待ちの永続化(再起動耐性): APPROVALタイプのみ approvals.json にミラー
+function approvalsPath() { return path.join(DATA_DIR, 'approvals.json'); }
+function loadApprovalsFile() { try { return JSON.parse(fs.readFileSync(approvalsPath(), 'utf-8')); } catch { return {}; } }
+function saveApprovalsFile(obj) { try { fs.writeFileSync(approvalsPath(), JSON.stringify(obj, null, 2), 'utf-8'); } catch (e) { console.error('[approval] save error:', e.message); } }
+function saveApprovalMirror(pendingId, entry) { const o = loadApprovalsFile(); o[pendingId] = entry; saveApprovalsFile(o); }
+function removeApprovalMirror(pendingId) { const o = loadApprovalsFile(); if (o[pendingId]) { delete o[pendingId]; saveApprovalsFile(o); } }
+function restoreApprovals() {
+  const o = loadApprovalsFile();
+  let n = 0;
+  for (const [pendingId, entry] of Object.entries(o)) {
+    pendingActions.set(pendingId, entry); n++;
+    const payload = { type: 'confirm_required', pendingId, agentId: entry.agentId || 'jenny', action: entry.kind || 'approval', summary: entry.summary, options: entry.options || ['承認', '却下'] };
+    if (entry.companyId) broadcastToCompany(entry.companyId, payload);
+  }
+  if (n > 0) console.log(`[approval] ${n}件の承認待ちを復元`);
+}
+
+// 承認キュー: エージェントの###APPROVAL###要求を既存pendingActions機構に積む
+function enqueueApproval({ kind, summary, options, companyId, agentId }) {
+  const pendingId = 'pend-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  const entry = {
+    type: 'APPROVAL', kind, summary, options, agentId: agentId || 'jenny', companyId,
+    createdAt: new Date().toISOString(),
+  };
+  pendingActions.set(pendingId, entry);
+  saveApprovalMirror(pendingId, entry);
+  const payload = {
+    type: 'confirm_required', pendingId,
+    agentId: agentId || 'jenny', action: kind || 'approval',
+    summary, options: options || ['承認', '却下'],
+  };
+  if (companyId) broadcastToCompany(companyId, payload);
+  else if (typeof wss !== 'undefined') wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(payload)); });
+  console.log('[approval] 承認待ちに追加:', pendingId, kind, summary?.slice(0, 60));
+  return pendingId;
 }
 
 app.get('/api/tasks', (req, res) => {
@@ -3962,6 +4054,57 @@ async function runAutonomousMessage(companyId, text) {
 }
 
 let lastAutonomousRun = 0;
+let lastGoalAdvanceRun = 0;
+let goalRotationIndex = 0; // 複数事業を順番に前進させるためのローテーション位置
+const GOAL_ADVANCE_MIN_INTERVAL = 4 * 60 * 60 * 1000; // 自走は最短4時間に1回
+
+/**
+ * 目標駆動の前進ループ(承認ゲート付き):
+ * goals.json のゴールと現状を比較し、秘書ジェニーに「次の1タスクを委託して進めて」と注入する。
+ * 外部影響操作は###APPROVAL###で承認待ちにさせる。コスト上限超過時は停止。
+ */
+async function runGoalDrivenAdvance(companyId) {
+  const s = readAppSettings();
+  if (!(s.anthropicApiKey || '').trim()) return;
+
+  // コストガード(日次 or 月次の上限)
+  {
+    const rate = s.usdJpyRate || 160;
+    if (costTracker.isOverBudget(s.dailyBudgetJpy, rate)) {
+      console.log('[goal-advance] 日次コスト上限到達 - 自走停止');
+      broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `本日のコスト上限(¥${s.dailyBudgetJpy})に達したため自走を停止しました` });
+      return;
+    }
+    if (costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate)) {
+      console.log('[goal-advance] 月次コスト上限到達 - 自走停止');
+      broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `今月のコスト上限(¥${s.monthlyBudgetJpy})に達したため自走を停止しました` });
+      return;
+    }
+  }
+  // レート制限
+  const now = Date.now();
+  if (now - lastGoalAdvanceRun < GOAL_ADVANCE_MIN_INTERVAL) return;
+
+  // ゴール読み込み
+  let goals = [];
+  try { goals = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goals.json'), 'utf-8')); } catch { return; }
+  const active = (Array.isArray(goals) ? goals : []).filter(g => g && g.active !== false && g.goal);
+  if (active.length === 0) return;
+
+  // 秘書セッションが必要(ネイティブAgent委託のため)
+  if (!(agentTeamsManager && agentTeamsManager.isJennyOnline())) {
+    console.log('[goal-advance] ジェニー未起動 - 自走スキップ');
+    return;
+  }
+  lastGoalAdvanceRun = now;
+
+  // 複数事業をラウンドロビンで前進（毎回1事業ずつ）
+  const g = active[goalRotationIndex % active.length];
+  goalRotationIndex = (goalRotationIndex + 1) % active.length;
+  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  console.log('[goal-advance] 自走発火:', g.project);
+  agentTeamsManager.sendToJenny(instruction, companyId);
+}
 
 // 起動時にWorkspaceのmemoryファイルを初期化
 (async () => {
@@ -4007,9 +4150,21 @@ async function runAutonomousTask() {
     if (!companies || companies.length === 0) return;
     const company = companies[0];
 
+    // コスト上限を超えていれば自走系の処理をスキップ(手動チャットは止めない)
+    const s = readAppSettings();
+    const rate = s.usdJpyRate || 160;
+    if (costTracker.isOverBudget(s.dailyBudgetJpy, rate) || costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate)) {
+      const limit = costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate) ? `今月の上限(¥${s.monthlyBudgetJpy})` : `本日の上限(¥${s.dailyBudgetJpy})`;
+      console.log('[autonomous] コスト上限到達 - 自走チェックをスキップ');
+      broadcastToCompany(company.id, { type: 'notification', level: 'warning', message: `${limit}に達したため自走を停止しました` });
+      return;
+    }
+
     // バックグラウンドでチェックし、問題がある場合のみ通知（タスクは作成しない）
     console.log(`[autonomous] Running hourly check for company ${company.id}`);
     await runAutonomousCheck(company.id);
+    // 目標駆動の前進(4時間に1回まで自己制限)
+    await runGoalDrivenAdvance(company.id);
   } catch (err) {
     console.error('[autonomous] hourly task error:', err.message);
   }
@@ -4253,6 +4408,9 @@ ${(() => {
           completedCount,
           newSkillsCount,
         });
+
+        // 朝の自走: ゴール駆動で1事業を前進させる(コスト/承認ガード付き)
+        await runGoalDrivenAdvance(companyId).catch((e) => console.error('[goal-advance] morning error:', e.message));
 
         console.log('[autonomous] Daily briefing sent with report data');
       }
