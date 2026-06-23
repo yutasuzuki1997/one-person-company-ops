@@ -11,3 +11,4 @@ companies/
 *.local
 /skills/
 tasks.json
+cost-ledger.json

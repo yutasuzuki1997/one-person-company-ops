@@ -2961,6 +2961,20 @@ app.get('/api/cost/today', (req, res) => {
   });
 });
 
+// ── 目標駆動の前進を手動トリガー(「今すぐ前進」) ──────────────────────────────
+// レート制限(4h)を無視して1サイクル発火。project指定で対象事業を固定可能。
+app.post('/api/goal-advance/run', async (req, res) => {
+  try {
+    const companyId = req.body?.companyId || (reg.listMeta()[0] || {}).id || null;
+    if (!companyId) return res.status(400).json({ ok: false, error: 'no_company' });
+    const forceProject = req.body?.project || null;
+    const result = await runGoalDrivenAdvance(companyId, { forceProject, ignoreRateLimit: true });
+    res.json({ ok: !!(result && result.fired), companyId, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── 確認待ち操作の承認・却下 ─────────────────────────────────────────────────
 
 app.post('/api/action/confirm', async (req, res) => {
@@ -4083,9 +4097,10 @@ const GOAL_ADVANCE_MIN_INTERVAL = 4 * 60 * 60 * 1000; // 自走は最短4時間�
  * goals.json のゴールと現状を比較し、秘書ジェニーに「次の1タスクを委託して進めて」と注入する。
  * 外部影響操作は###APPROVAL###で承認待ちにさせる。コスト上限超過時は停止。
  */
-async function runGoalDrivenAdvance(companyId) {
+async function runGoalDrivenAdvance(companyId, opts = {}) {
+  const { forceProject = null, ignoreRateLimit = false } = opts;
   const s = readAppSettings();
-  if (!(s.anthropicApiKey || '').trim()) return;
+  if (!(s.anthropicApiKey || '').trim()) return { fired: false, reason: 'no_api_key' };
 
   // コストガード(日次 or 月次の上限)
   {
@@ -4093,17 +4108,17 @@ async function runGoalDrivenAdvance(companyId) {
     if (costTracker.isOverBudget(s.dailyBudgetJpy, rate)) {
       console.log('[goal-advance] 日次コスト上限到達 - 自走停止');
       broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `本日のコスト上限(¥${s.dailyBudgetJpy})に達したため自走を停止しました` });
-      return;
+      return { fired: false, reason: 'daily_budget' };
     }
     if (costTracker.isOverMonthlyBudget(s.monthlyBudgetJpy, rate)) {
       console.log('[goal-advance] 月次コスト上限到達 - 自走停止');
       broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `今月のコスト上限(¥${s.monthlyBudgetJpy})に達したため自走を停止しました` });
-      return;
+      return { fired: false, reason: 'monthly_budget' };
     }
   }
-  // レート制限
+  // レート制限(手動トリガー時はignoreRateLimitでスキップ可)
   const now = Date.now();
-  if (now - lastGoalAdvanceRun < GOAL_ADVANCE_MIN_INTERVAL) return;
+  if (!ignoreRateLimit && now - lastGoalAdvanceRun < GOAL_ADVANCE_MIN_INTERVAL) return { fired: false, reason: 'rate_limited' };
 
   // ゴール読み込み
   let goals = [];
@@ -4114,21 +4129,28 @@ async function runGoalDrivenAdvance(companyId) {
   const active = allWithGoal.filter(g => g.needsContext !== true);
   const skipped = allWithGoal.length - active.length;
   if (skipped > 0) console.log(`[goal-advance] needsContext未設定の${skipped}件を自走対象から除外`);
-  if (active.length === 0) return;
+  if (active.length === 0) return { fired: false, reason: 'no_active_goal' };
 
   // 秘書セッションが必要(ネイティブAgent委託のため)
   if (!(agentTeamsManager && agentTeamsManager.isJennyOnline())) {
     console.log('[goal-advance] ジェニー未起動 - 自走スキップ');
-    return;
+    return { fired: false, reason: 'jenny_offline' };
   }
   lastGoalAdvanceRun = now;
 
-  // 複数事業をラウンドロビンで前進（毎回1事業ずつ）
-  const g = active[goalRotationIndex % active.length];
-  goalRotationIndex = (goalRotationIndex + 1) % active.length;
+  // 対象事業の選定: forceProject指定時はそれを、無ければラウンドロビンで1事業ずつ
+  let g;
+  if (forceProject) {
+    g = active.find(x => x.project === forceProject);
+    if (!g) return { fired: false, reason: 'project_not_found', available: active.map(x => x.project) };
+  } else {
+    g = active[goalRotationIndex % active.length];
+    goalRotationIndex = (goalRotationIndex + 1) % active.length;
+  }
   const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズ(実作業・素材作成・実装)へ進めること。作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project);
   agentTeamsManager.sendToJenny(instruction, companyId);
+  return { fired: true, project: g.project, owner: g.owner };
 }
 
 // 起動時にWorkspaceのmemoryファイルを初期化
