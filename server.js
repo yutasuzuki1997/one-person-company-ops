@@ -3458,6 +3458,19 @@ async function mainCli() {
         onAgentCompletion: handleAgentCompletion,
         onUsage: (rec) => { try { costTracker.recordUsage(rec); } catch (e) { console.error('[cost] recordUsage error:', e.message); } },
         onApproval: (a) => enqueueApproval(a),
+        onJennyMessage: ({ companyId, text }) => {
+          try {
+            const cid = companyId || defaultCompanyId;
+            if (!cid) return;
+            reg.appendConversation(cid, {
+              id: 'msg-' + Date.now(),
+              role: 'secretary',
+              agentId: null,
+              content: text,
+              timestamp: new Date().toISOString(),
+            });
+          } catch (e) { console.error('[conversation] appendConversation error:', e.message); }
+        },
       });
       agentTeamsManager.startJenny().catch(e => console.error('[agent-teams] startJenny error:', e.message));
     } else {
