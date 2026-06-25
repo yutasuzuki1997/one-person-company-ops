@@ -17,6 +17,7 @@ const { completeAnthropic, streamAnthropic } = require('./lib/anthropic-stream')
 const { listRepositories, getFileContent, updateFileContent, listFileTree, createPullRequest, mergePullRequest, listPullRequests, getPullRequest } = require('./lib/github-connector');
 const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
+const { runQaGate } = require('./lib/qa-gate');
 const { logActivity, getActivityLog } = require('./lib/activity-logger');
 const { getMemoryContext, saveCompletionToWorkspace, detectStaleProjects, ensureMemoryFiles, detectProject } = require('./lib/workspace-memory');
 const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
@@ -2976,6 +2977,29 @@ app.post('/api/goal-advance/run', async (req, res) => {
   }
 });
 
+// 検証用: QAゲートを手動発火させる(疑似完了報告を流して差し戻し挙動を確認)
+// 例: POST /api/qa/simulate {"summary":"これから調査します。完了しました。"} → suspect→差し戻し
+app.post('/api/qa/simulate', async (req, res) => {
+  try {
+    const { summary, success = true, agentId = 'agent-pm-overdue', agentName = 'トム', taskName = 'QAゲート検証(疑似完了)' } = req.body || {};
+    if (!summary) return res.status(400).json({ ok: false, error: 'summary required' });
+    const companyId = req.body?.companyId || (reg.listMeta()[0] || {}).id || null;
+    const tasks = loadTasksFile();
+    const taskId = 'qa-test-' + Date.now();
+    tasks.push({ id: taskId, name: taskName, status: 'active', messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    saveTasksFile(tasks);
+    const qa = runQaGate(summary, { baseDir: DATA_DIR, sinceMs: 0 });
+    await handleAgentCompletion(companyId, agentId, agentName, summary, taskId, success, { fromNative: true });
+    const after = loadTasksFile().find((t) => t.id === taskId);
+    const result = { taskStatus: after && after.status, qaField: after && after.qa };
+    // 疑似タスクは検証用なので残さない
+    saveTasksFile(loadTasksFile().filter((t) => t.id !== taskId));
+    res.json({ ok: true, taskId, qa, ...result, reworkFired: qa.verdict === 'suspect' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── 確認待ち操作の承認・却下 ─────────────────────────────────────────────────
 
 app.post('/api/action/confirm', async (req, res) => {
@@ -3856,6 +3880,57 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
   const compactSummary = summary
     ? summary.split('\n').filter(l => l.trim()).slice(0, 3).join('\n')
     : '作業完了';
+  // 0. 完了前の品質ゲート(QA Gate): 成功報告のみ、成果物の実体をプログラム検証する。
+  //    suspect かつ未差し戻しなら1回だけ自動差し戻し(ループ防止: task.qaRetried)。
+  if (success) {
+    try {
+      const tasks = loadTasksFile();
+      const task = tasks.find((t) => t.id === taskId);
+      const sinceMs = task && task.createdAt ? Date.parse(task.createdAt) : 0;
+      const qa = runQaGate(summary, { baseDir: DATA_DIR, sinceMs });
+      // カスケード防止: 差し戻し→再委託は毎回新taskIdを生むためtask単位ガードは効かない。
+      // 会社単位の連続差し戻し回数(qaReworkStreak)で上限を設ける。QA合格でリセット。
+      if (qa.verdict === 'suspect' && !(task && task.qaRetried) && qaReworkStreak < QA_REWORK_MAX) {
+        qaReworkStreak++;
+        const qaMsg = `⚠️ QAゲート不合格(${agentName}): ${qa.reasons.join(' / ')}`;
+        if (task) {
+          task.status = 'error';
+          task.qa = { verdict: qa.verdict, reasons: qa.reasons, at: new Date().toISOString() };
+          task.qaRetried = true;
+          task.updatedAt = new Date().toISOString();
+          saveTasksFile(tasks);
+        }
+        saveTaskMessage(taskId, { role: 'system', content: qaMsg, timestamp: new Date().toISOString() });
+        broadcastToCompany(companyId, { type: 'qa_failed', agentId, agentName, taskId, reasons: qa.reasons, message: qaMsg });
+        console.log(`[qa-gate] 差し戻し(${qaReworkStreak}/${QA_REWORK_MAX}):`, taskId, qa.reasons.join(' / '));
+        // ジェニーに再作業を自動注入
+        if (agentTeamsManager && agentTeamsManager.isJennyOnline && agentTeamsManager.isJennyOnline()) {
+          const reinstruct = `【QA差し戻し】先ほどの「${(task && task.name) || agentName}」の完了報告は品質ゲートを通過しませんでした。\n理由: ${qa.reasons.join(' / ')}\n担当エージェントに、実際の成果物ファイル(reports/ 等)を作成・保存し直すよう委託してください。完了報告には必ず ###ARTIFACT path="..."### で成果物パスを明示すること。`;
+          agentTeamsManager.sendToJenny(reinstruct, companyId);
+        }
+        return; // 通常の完了処理(report/workspace保存)はスキップ
+      }
+      if (qa.verdict === 'suspect') {
+        // 上限到達 or 既に差し戻し済み: 自動注入は止めてYutaに判断を委ねる
+        qaReworkStreak = 0;
+        const stopMsg = `⚠️ QAゲート不合格が続いています(${agentName}): ${qa.reasons.join(' / ')}。自動差し戻しを停止しました。手動で確認してください。`;
+        if (task) { task.status = 'error'; task.qa = { verdict: qa.verdict, reasons: qa.reasons, at: new Date().toISOString() }; task.updatedAt = new Date().toISOString(); saveTasksFile(tasks); }
+        saveTaskMessage(taskId, { role: 'system', content: stopMsg, timestamp: new Date().toISOString() });
+        broadcastToCompany(companyId, { type: 'qa_failed', agentId, agentName, taskId, reasons: qa.reasons, message: stopMsg, halted: true });
+        console.log('[qa-gate] 差し戻し上限到達 - 自動停止:', taskId);
+        return;
+      }
+      // pass: 連続差し戻しをリセットし、QA結果を記録して通常処理へ
+      qaReworkStreak = 0;
+      if (task) {
+        task.qa = { verdict: qa.verdict, reasons: qa.reasons, at: new Date().toISOString() };
+        saveTasksFile(tasks);
+      }
+    } catch (e) {
+      console.error('[qa-gate] error:', e.message);
+    }
+  }
+
   const completionMessage = success
     ? `✅ ${agentName}が完了\n${compactSummary}`
     : `❌ ${agentName}でエラー\n${compactSummary}`;
@@ -4104,6 +4179,8 @@ async function runAutonomousMessage(companyId, text) {
 let lastAutonomousRun = 0;
 let lastGoalAdvanceRun = 0;
 let goalRotationIndex = 0; // 複数事業を順番に前進させるためのローテーション位置
+let qaReworkStreak = 0; // QA差し戻しの連続回数(カスケード防止)。QA合格でリセット
+const QA_REWORK_MAX = 2; // 連続差し戻しの上限。超えたら自動注入せずYutaに通知して止める
 const GOAL_ADVANCE_MIN_INTERVAL = 4 * 60 * 60 * 1000; // 自走は最短4時間に1回
 
 /**
@@ -4161,7 +4238,7 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
     g = active[goalRotationIndex % active.length];
     goalRotationIndex = (goalRotationIndex + 1) % active.length;
   }
-  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズ(実作業・素材作成・実装)へ進めること。作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズ(実作業・素材作成・実装)へ進めること。作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project);
   agentTeamsManager.sendToJenny(instruction, companyId);
   return { fired: true, project: g.project, owner: g.owner };

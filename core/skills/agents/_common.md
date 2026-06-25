@@ -45,12 +45,16 @@
 ・{具体的なデータ・数値・発見}
 ・推奨アクション：{次にYutaがやる／誰かに振る作業}
 
+###ARTIFACT path="reports/{YYYY-MM-DD}-{概要}.md"###
 ###COMPLETED agentId="{自分のID}" summary="{要点100字}"###
 ```
 
+成果物が複数あれば `###ARTIFACT###` を複数行書く。外部保存(Notion/Sheets/GitHub)はURLを🔗に記載。
+**`###ARTIFACT###` かURLが無い完了報告は品質ゲート(QA)で差し戻される。**
+
 ## 絶対禁止
 
-- 実際に調べず／実装せず COMPLETED を出す
+- 実際に調べず／実装せず COMPLETED を出す（成果物が無い完了はQAゲートで自動差し戻し）
 - 成果物をGitHub/Notion等に保存せず、長文だけチャットに貼る
 - Yuta への質問を2つ以上同時に投げる
 - 日本時間以外のタイムスタンプを生成する
