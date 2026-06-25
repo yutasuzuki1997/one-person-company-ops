@@ -18,6 +18,7 @@ const { listRepositories, getFileContent, updateFileContent, listFileTree, creat
 const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
 const { runQaGate } = require('./lib/qa-gate');
+const { buildIndexFromReports, registerArtifacts, getProjectContext, resolveProject } = require('./lib/project-knowledge');
 const { logActivity, getActivityLog } = require('./lib/activity-logger');
 const { getMemoryContext, saveCompletionToWorkspace, detectStaleProjects, ensureMemoryFiles, detectProject } = require('./lib/workspace-memory');
 const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
@@ -3926,6 +3927,13 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
         task.qa = { verdict: qa.verdict, reasons: qa.reasons, at: new Date().toISOString() };
         saveTasksFile(tasks);
       }
+      // 検証済み成果物をプロジェクト知識インデックスへ登録(書き込み⇄読み戻しのループを閉じる)
+      try {
+        let goals = [];
+        try { goals = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goals.json'), 'utf-8')); } catch {}
+        const project = resolveProject(agentId, task && task.name, goals);
+        if (project) registerArtifacts(DATA_DIR, project, qa.artifacts, { agent: agentId, at: new Date().toISOString() });
+      } catch (e) { console.error('[project-knowledge] register error:', e.message); }
     } catch (e) {
       console.error('[qa-gate] error:', e.message);
     }
@@ -4238,7 +4246,12 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
     g = active[goalRotationIndex % active.length];
     goalRotationIndex = (goalRotationIndex + 1) % active.length;
   }
-  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズ(実作業・素材作成・実装)へ進めること。作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  // 過去資産の構造化注入: このプロジェクトの既存成果物を具体的に列挙して渡す(調査の空回り防止)
+  const knownAssets = getProjectContext(DATA_DIR, g.project);
+  const assetBlock = knownAssets
+    ? `\n重要(調査の空回り防止): このプロジェクトには既に以下の成果物があります。着手前に必ず該当ファイルを Read で確認し、調査が済んでいるテーマは繰り返さず次フェーズ(実作業・素材作成・実装)へ進めること:\n${knownAssets}`
+    : `\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズへ進めること。`;
+  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project);
   agentTeamsManager.sendToJenny(instruction, companyId);
   return { fired: true, project: g.project, owner: g.owner };
@@ -4252,6 +4265,20 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
     await ensureMemoryFiles(ghToken);
   } catch (e) {
     console.error('[memory] 初期化エラー:', e.message);
+  }
+})();
+
+// 起動時: 既存 reports/ をプロジェクト知識インデックスへ取り込む(冪等)
+(() => {
+  try {
+    let goals = [];
+    try { goals = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goals.json'), 'utf-8')); } catch {}
+    const projects = (Array.isArray(goals) ? goals : []).map((g) => g && g.project).filter(Boolean);
+    const idx = buildIndexFromReports(DATA_DIR, projects);
+    const n = Object.values(idx).reduce((s, b) => s + (b.artifacts ? b.artifacts.length : 0), 0);
+    console.log(`[project-knowledge] インデックス初期化: ${Object.keys(idx).length}プロジェクト / ${n}成果物`);
+  } catch (e) {
+    console.error('[project-knowledge] bootstrap error:', e.message);
   }
 })();
 
