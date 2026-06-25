@@ -2952,6 +2952,7 @@ app.get('/api/cost/today', (req, res) => {
     monthCostUsd: costTracker.getMonthlyCostUsd(),
     monthCostJpy: Math.round(costTracker.getMonthlyCostJpy(rate)),
     breakdown: costTracker.getDailyBreakdown(date),
+    breakdownApportioned: costTracker.getDailyBreakdownApportioned(date),
     dailyBudgetJpy: s.dailyBudgetJpy || 0,
     monthlyBudgetJpy: s.monthlyBudgetJpy || 0,
     overBudget: overDaily || overMonthly,
