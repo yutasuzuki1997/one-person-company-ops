@@ -19,6 +19,7 @@ const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require(
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
 const { runQaGate } = require('./lib/qa-gate');
 const { buildIndexFromReports, registerArtifacts, getProjectContext, resolveProject } = require('./lib/project-knowledge');
+const { detectExternalOp } = require('./lib/external-op');
 const { logActivity, getActivityLog } = require('./lib/activity-logger');
 const { getMemoryContext, saveCompletionToWorkspace, detectStaleProjects, ensureMemoryFiles, detectProject } = require('./lib/workspace-memory');
 const { generateSkillFromPattern, collectDailySkillsReport, detectRepetitivePatterns } = require('./lib/skills-generator');
@@ -1576,6 +1577,13 @@ app.post('/api/secretary/message', async (req, res) => {
   const classification = isMorningFastPath
     ? { weight: 'instant', reason: '朝ブリーフィング（fast path）' }
     : await classifyTask(String(text).trim(), s);
+  // 外部影響のある操作(投稿/送信/課金/デプロイ/マージ/提出等)は承認ゲートのある
+  // native ジェニー経路に必ず乗せる(P1)。light/instantの旧経路には承認検出が無いため。
+  const externalOp = detectExternalOp(String(text).trim());
+  if (externalOp && classification.weight !== 'complex') {
+    classification.weight = 'heavy';
+    console.log('[secretary] 外部操作を検知 → 承認ゲート経路(heavy/native)へ強制');
+  }
   console.log('[secretary] タスク分類:', classification.weight, classification.reason);
   sendSSE({ type: 'task_classified', weight: classification.weight, reason: classification.reason });
 
@@ -1695,6 +1703,14 @@ app.post('/api/secretary/message', async (req, res) => {
         // AgentTeamsManager が起動していればジェニーに直接送る
         if (agentTeamsManager && agentTeamsManager.isJennyOnline()) {
           agentTeamsManager.sendToJenny(text, companyId);
+          return;
+        }
+        // 外部操作はジェニー停止中に自動実行しない(承認ゲートを通せないため保留)
+        if (externalOp) {
+          const msg = '外部操作には承認が必要ですが、秘書(ジェニー)が起動していないため保留しました。秘書の起動後に再度ご依頼ください。';
+          saveTaskMessage(newTaskId, { role: 'secretary', content: msg, timestamp: new Date().toISOString() });
+          broadcastToCompany(companyId, { type: 'secretary_report', message: msg, taskId: newTaskId });
+          console.warn('[secretary] 外部操作をジェニー未起動のため保留:', String(text).slice(0, 60));
           return;
         }
         // フォールバック：従来の completeAnthropic + AgentExecutor
