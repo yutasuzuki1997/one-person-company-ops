@@ -3974,6 +3974,30 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
         const project = resolveProject(agentId, task && task.name, goals);
         if (project) registerArtifacts(DATA_DIR, project, qa.artifacts, { agent: agentId, at: new Date().toISOString() });
       } catch (e) { console.error('[project-knowledge] register error:', e.message); }
+      // P4: QA LLMエスカレーション(任意・既定off)。app-settings.json の qaLlmEscalation=true で有効。
+      //     有効時のみ成果物の中身をHaikuで品質レビュー(非ブロッキング)。
+      try {
+        const sset = readAppSettings();
+        const localArt = (qa.artifacts || []).find((a) => a.exists && /\.md$/.test(a.path || ''));
+        if (sset.qaLlmEscalation && sset.anthropicApiKey && localArt) {
+          (async () => {
+            try {
+              let body = '';
+              try { body = fs.readFileSync(path.join(DATA_DIR, localArt.path), 'utf-8').slice(0, 6000); } catch {}
+              if (!body) return;
+              const review = await completeAnthropic({
+                apiKey: sset.anthropicApiKey, model: 'claude-haiku-4-5-20251001',
+                system: 'あなたはQAレビュアー(ハナ)。渡された成果物に品質上の重大な問題(事実誤り/未完成/プレースホルダ放置/指示との不一致)があれば3行以内で指摘。問題なければ「品質OK」のみ返す。',
+                messages: [{ role: 'user', content: `成果物 ${localArt.path}:\n\n${body}` }], maxTokens: 256,
+              });
+              const msg = `🔎 QA二次レビュー(${localArt.path}): ${review.trim()}`;
+              saveTaskMessage(taskId, { role: 'system', content: msg, timestamp: new Date().toISOString() });
+              broadcastToCompany(companyId, { type: 'qa_review', taskId, artifact: localArt.path, review: review.trim() });
+              console.log('[qa-gate] LLM二次レビュー:', localArt.path, review.trim().slice(0, 60));
+            } catch (e) { console.error('[qa-gate] LLMレビューerror:', e.message); }
+          })();
+        }
+      } catch {}
     } catch (e) {
       console.error('[qa-gate] error:', e.message);
     }
