@@ -502,8 +502,10 @@ function TaskTerminal({ task, streamContent, agents, onConfirm, onSendMessage, i
 }
 
 // 本日のAIコスト表示バッジ（/api/cost/today を60秒ごとにポーリング）
-function CostBadge() {
+// クリックで本日のエージェント別内訳（breakdownApportioned＝当日総USDをトークン按分した推定）を展開表示。
+function CostBadge({ agents = [] }) {
   const [cost, setCost] = useState(null);
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     let alive = true;
     const fetchCost = () => fetch('/api/cost/today').then((r) => r.json()).then((d) => { if (alive) setCost(d); }).catch(() => {});
@@ -516,24 +518,76 @@ function CostBadge() {
   const todayJpy = Math.round(cost.costJpy || 0).toLocaleString();
   const monthJpy = Math.round(cost.monthCostJpy || 0).toLocaleString();
   const dailyCap = cost.dailyBudgetJpy ? ` / ¥${cost.dailyBudgetJpy.toLocaleString()}` : '';
+
+  const rate = cost.usdJpyRate || 160;
+  const nameOf = (id) => {
+    if (id === 'jenny' || id === 'secretary') return 'ジェニー（統括秘書）';
+    if (id === 'unknown') return '未分類';
+    const a = agents.find((x) => x.id === id);
+    return a ? (a.displayName || a.name || id) : id;
+  };
+  const rows = Object.entries(cost.breakdownApportioned || {})
+    .map(([id, e]) => ({
+      id,
+      name: nameOf(id),
+      jpy: Math.round((e.costUsdApportioned || 0) * rate),
+      tokens: e.totalTokens || 0,
+      calls: e.calls || 0,
+    }))
+    .sort((a, b) => b.jpy - a.jpy);
+
   return (
-    <span
-      title={`本日 $${(cost.costUsd || 0).toFixed(2)} / 今月 $${(cost.monthCostUsd || 0).toFixed(2)}${cost.dailyBudgetJpy ? ` ／ 日上限 ¥${cost.dailyBudgetJpy.toLocaleString()}` : '（上限未設定）'}`}
-      style={{
-        fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
-        color: over ? '#fca5a5' : '#7dd3fc',
-        background: over ? 'rgba(248,113,113,0.12)' : 'rgba(56,189,248,0.1)',
-        border: `1px solid ${over ? 'rgba(248,113,113,0.4)' : 'rgba(56,189,248,0.3)'}`,
-        fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
-      }}
-    >
-      本日 ¥{todayJpy}{dailyCap} ・ 今月 ¥{monthJpy}{over ? ' ⚠上限' : ''}
+    <span style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={`本日 $${(cost.costUsd || 0).toFixed(2)} / 今月 $${(cost.monthCostUsd || 0).toFixed(2)}${cost.dailyBudgetJpy ? ` ／ 日上限 ¥${cost.dailyBudgetJpy.toLocaleString()}` : '（上限未設定）'}（クリックで内訳）`}
+        style={{
+          fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+          color: over ? '#fca5a5' : '#7dd3fc',
+          background: over ? 'rgba(248,113,113,0.12)' : 'rgba(56,189,248,0.1)',
+          border: `1px solid ${over ? 'rgba(248,113,113,0.4)' : 'rgba(56,189,248,0.3)'}`,
+          fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', cursor: 'pointer',
+        }}
+      >
+        本日 ¥{todayJpy}{dailyCap} ・ 今月 ¥{monthJpy}{over ? ' ⚠上限' : ''} ▾
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 50,
+            minWidth: 260, maxHeight: 320, overflowY: 'auto',
+            padding: '8px 10px', borderRadius: 10,
+            background: 'rgba(6,13,26,0.97)', border: '1px solid rgba(56,189,248,0.3)',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)', fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', marginBottom: 6 }}>
+            本日のエージェント別コスト（推定按分）
+          </div>
+          {rows.length === 0 ? (
+            <div style={{ fontSize: 11, color: '#64748b', padding: '4px 0' }}>本日の実績はまだありません</div>
+          ) : (
+            rows.map((r) => (
+              <div key={r.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', fontSize: 11 }}>
+                <span style={{ flex: 1, color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name}</span>
+                <span style={{ color: '#7dd3fc', fontWeight: 700 }}>¥{r.jpy.toLocaleString()}</span>
+                <span style={{ color: '#475569', minWidth: 64, textAlign: 'right' }}>{(r.tokens / 1000).toFixed(1)}k・{r.calls}回</span>
+              </div>
+            ))
+          )}
+          <div style={{ borderTop: '1px solid rgba(51,65,85,0.4)', marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
+            <span>合計（真値）</span>
+            <span style={{ color: '#e2e8f0', fontWeight: 700 }}>¥{todayJpy}</span>
+          </div>
+        </div>
+      )}
     </span>
   );
 }
 
 // ジェニーチャットビュー（タスクとは別の会話画面）
-function JennyChatView({ messages, streamContent, onSendMessage, isSending }) {
+function JennyChatView({ messages, streamContent, onSendMessage, isSending, agents = [] }) {
   const bottomRef = useRef(null);
   const [inputText, setInputText] = useState('');
 
@@ -560,7 +614,7 @@ function JennyChatView({ messages, streamContent, onSendMessage, isSending }) {
           </div>
           <span style={{ color: '#22c55e', fontSize: 8, marginLeft: 4 }}>●</span>
           <span style={{ flex: 1 }} />
-          <CostBadge />
+          <CostBadge agents={agents} />
         </div>
       </div>
 
@@ -1407,6 +1461,7 @@ export default function Dashboard({ onNavigate }) {
             streamContent={streamContent}
             onSendMessage={handleJennySendMessage}
             isSending={isSending}
+            agents={agents}
           />
         ) : (
           <TaskTerminal
