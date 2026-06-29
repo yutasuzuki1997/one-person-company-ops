@@ -4292,7 +4292,7 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
     ? `\n重要(調査の空回り防止): このプロジェクトには既に以下の成果物があります。着手前に必ず該当ファイルを Read で確認し、調査が済んでいるテーマは繰り返さず次フェーズ(実作業・素材作成・実装)へ進めること:\n${knownAssets}`
     : `\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズへ進めること。`;
   const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
-  console.log('[goal-advance] 自走発火:', g.project);
+  console.log('[goal-advance] 自走発火:', g.project, '/ 資産注入:', knownAssets ? `${knownAssets.split('\n').length}件` : 'なし');
   agentTeamsManager.sendToJenny(instruction, companyId);
   return { fired: true, project: g.project, owner: g.owner };
 }

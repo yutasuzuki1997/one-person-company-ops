@@ -3,7 +3,7 @@
     "project": "Overdue.",
     "active": true,
     "goal": "Overdue.(iPhone習慣化アプリ)をApp Store審査通過・公開まで到達させる",
-    "currentState": "申請素材ほぼ整備完了。Privacy Manifest(B)・差別化文言(A)・スクショ構成案/実機QAチェックリスト/App Privacy申告値(C/D, reports/overdue-qa-screenshots.md)まで作成済。残: agent-sp-engでQA不具合修正&fastlane反映→実機QA実施→鈴木さん承認(###APPROVAL###)を得てTestFlight配布&App Store再提出。",
+    "currentState": "申請素材整備完了。差別化文言(A)はfastlane ja/en-US両ロケールに反映済・全フィールド文字数上限内で検証完了(reports/overdue-fastlane-metadata.md)。Privacy Manifest(B)・スクショ構成案/実機QAチェックリスト/App Privacy申告値(C/D, reports/overdue-qa-screenshots.md)も作成済。残: 鈴木さんの実機QA(C項)・スクショ差別化反映確認(D項)・App Privacy=Data Not Collected設定・サポート/PPポリシーURL生存確認→QA不具合あればagent-sp-engで修正→鈴木さん承認(###APPROVAL###)を得てTestFlight配布&App Store再提出。",
     "owner": "agent-pm-overdue"
   },
   {
