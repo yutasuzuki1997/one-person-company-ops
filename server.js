@@ -3969,7 +3969,7 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
           const claimNote = fabricated
             ? `\n※ 報告に実在しないコミット/PRの主張が含まれていました。currentStateや報告には実際に存在する事実のみを書き、未実施のコミットハッシュ・PR番号を創作しないこと。`
             : '';
-          const reinstruct = `【QA差し戻し】先ほどの「${(task && task.name) || agentName}」の完了報告は品質ゲートを通過しませんでした。\n理由: ${qa.reasons.join(' / ')}\n担当エージェントに、実際の成果物ファイル(reports/ 等)を作成・保存し直すよう委託してください。完了報告には必ず ###ARTIFACT path="..."### で成果物パスを明示すること。${claimNote}`;
+          const reinstruct = `【QA差し戻し】先ほどの「${(task && task.name) || agentName}」の完了報告は品質ゲートを通過しませんでした。\n理由: ${qa.reasons.join(' / ')}\n作り直しは必ず元の実装担当「${agentName}」(subagent_type: ${agentId})に再委託すること。レビュー/QA担当(agent-sp-qa)に成果物の作成を振らないこと(役割不一致)。\n担当に、実際の成果物ファイル(reports/ 等)を作成・保存し直すよう委託してください。完了報告には必ず ###ARTIFACT path="..."### で成果物パスを明示すること。${claimNote}`;
           agentTeamsManager.sendToJenny(reinstruct, companyId);
         }
         return; // 通常の完了処理(report/workspace保存)はスキップ
@@ -4338,7 +4338,20 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
   const assetBlock = knownAssets
     ? `\n重要(調査の空回り防止): このプロジェクトには既に以下の成果物があります。着手前に必ず該当ファイルを Read で確認し、調査が済んでいるテーマは繰り返さず次フェーズ(実作業・素材作成・実装)へ進めること:\n${knownAssets}`
     : `\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズへ進めること。`;
-  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\ncurrentStateと完了報告には実際に存在する事実のみを書くこと。未実施のコミットハッシュ・PR番号・URLを創作しない(実在検証で差し戻されます)。コミット/PRに言及する場合は実際に作成したものだけを正確に記載すること。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  // P5: 前サイクルが残した currentState の事後点検。捏造主張(実在しないコミット/PR)があれば是正させる。
+  let currentStateNote = '';
+  try {
+    const cvSettings = readAppSettings();
+    if (cvSettings.claimVerify !== false && g.currentState) {
+      const cv = verifyClaims(g.currentState, { settings: cvSettings, project: g.project });
+      if (cv.verdict === 'fabricated') {
+        console.log('[claim-verifier] currentStateに捏造主張:', g.project, cv.reasons.join(' / '));
+        broadcastToCompany(companyId, { type: 'notification', level: 'warning', message: `「${g.project}」のcurrentStateに実在しない主張: ${cv.reasons.join(' / ')}` });
+        currentStateNote = `\n⚠️ 現状(currentState)に実在しない主張が含まれています(${cv.reasons.join(' / ')})。最初に goals.json の当該記述を事実に修正(該当のコミット/PR記述を削除または正しい値に訂正)してから本作業に進むこと。`;
+      }
+    }
+  } catch (e) { console.error('[claim-verifier] currentState scan error:', e.message); }
+  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」${currentStateNote}\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\ncurrentStateと完了報告には実際に存在する事実のみを書くこと。未実施のコミットハッシュ・PR番号・URLを創作しない(実在検証で差し戻されます)。コミット/PRに言及する場合は実際に作成したものだけを正確に記載すること。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project, '/ 資産注入:', knownAssets ? `${knownAssets.split('\n').length}件` : 'なし');
   agentTeamsManager.sendToJenny(instruction, companyId);
   return { fired: true, project: g.project, owner: g.owner };

@@ -28,6 +28,20 @@ Overdueリポジトリの実在コミット(`f259df121b8...`「feat(metadata): 4
 ローカルops repoに無かっただけ。→ ローカルのみ照合する素朴な実装なら誤差し戻ししていた。
 本実装は複数リポジトリ横断＋GitHub実在照合で、この誤検知を回避している。
 
-## 残課題
-- 裸の `#123` はリポジトリ曖昧のため未対応(URL形式PRのみ)。
-- currentState(goals.json)の事後スキャンは未実装。現状は完了報告summary経由で検出。
+## 追加対応(2026-06-29 後続)
+バックログ残3件を優先度順に実装:
+
+### ① QA差し戻しの委託先ミスマッチ(server.js)
+再指示文に「作り直しは必ず元の実装担当『${agentName}』(subagent_type: ${agentId})へ。QA担当(agent-sp-qa)に振らないこと」を明記。役割不一致の空回りを防止。
+
+### ② isJennyOnline の readiness 化(agent-teams-manager.js)
+旧: プロセス生存だけで online=true(spawn直後・claude起動前でも online)。
+新: `jennyReady` を追加し `system/init`(セッション確立)受信で初めて online 確定+`jenny_online` broadcast。close/shutdownでreset。
+→ 起動途中の差し戻し再注入・自走発火の取りこぼしを防止。未init中は isJennyOnline()=false でフォールバック(AgentExecutor)に委ねる。
+検証: プロセス起動のみ→offline / init受信→online+broadcast / close→offline を確認。
+
+### ③ 裸#N + currentState事後スキャン(claim-verifier.js + server.js)
+- 裸 `#123`: 近傍にPR/Issue文脈語がある時のみ抽出し、project一致リポジトリ1件に対してのみ `issues/N`(PR包含)で照合。project不明なら unverified(誤検知回避)。
+- `scanCurrentStates(goals)`: goals.json各プロジェクトの currentState を走査。runGoalDrivenAdvance で選定プロジェクトの currentState を事後点検し、捏造があれば warning broadcast+自走指示の冒頭に是正指示を注入。
+
+ユニット: 既存10 + 追加8 = 18/18 pass。
