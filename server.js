@@ -2988,7 +2988,8 @@ app.post('/api/goal-advance/run', async (req, res) => {
     const companyId = req.body?.companyId || (reg.listMeta()[0] || {}).id || null;
     if (!companyId) return res.status(400).json({ ok: false, error: 'no_company' });
     const forceProject = req.body?.project || null;
-    const result = await runGoalDrivenAdvance(companyId, { forceProject, ignoreRateLimit: true });
+    const dryRun = req.body?.dryRun === true;
+    const result = await runGoalDrivenAdvance(companyId, { forceProject, ignoreRateLimit: true, dryRun });
     res.json({ ok: !!(result && result.fired), companyId, ...result });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -4284,7 +4285,7 @@ const GOAL_ADVANCE_MIN_INTERVAL = 4 * 60 * 60 * 1000; // 自走は最短4時間�
  * 外部影響操作は###APPROVAL###で承認待ちにさせる。コスト上限超過時は停止。
  */
 async function runGoalDrivenAdvance(companyId, opts = {}) {
-  const { forceProject = null, ignoreRateLimit = false } = opts;
+  const { forceProject = null, ignoreRateLimit = false, dryRun = false } = opts;
   const s = readAppSettings();
   if (!(s.anthropicApiKey || '').trim()) return { fired: false, reason: 'no_api_key' };
 
@@ -4317,8 +4318,8 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
   if (skipped > 0) console.log(`[goal-advance] needsContext未設定の${skipped}件を自走対象から除外`);
   if (active.length === 0) return { fired: false, reason: 'no_active_goal' };
 
-  // 秘書セッションが必要(ネイティブAgent委託のため)
-  if (!(agentTeamsManager && agentTeamsManager.isJennyOnline())) {
+  // 秘書セッションが必要(ネイティブAgent委託のため)。dryRun(検証用)は委託せず注入文を組むだけなので不要。
+  if (!dryRun && !(agentTeamsManager && agentTeamsManager.isJennyOnline())) {
     console.log('[goal-advance] ジェニー未起動 - 自走スキップ');
     return { fired: false, reason: 'jenny_offline' };
   }
@@ -4352,6 +4353,10 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
     }
   } catch (e) { console.error('[claim-verifier] currentState scan error:', e.message); }
   const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」${currentStateNote}\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\ncurrentStateと完了報告には実際に存在する事実のみを書くこと。未実施のコミットハッシュ・PR番号・URLを創作しない(実在検証で差し戻されます)。コミット/PRに言及する場合は実際に作成したものだけを正確に記載すること。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  // dryRun(検証用): 委託せず、組み上げた注入文と currentState 点検結果だけ返す(課金なし)
+  if (dryRun) {
+    return { fired: false, dryRun: true, project: g.project, owner: g.owner, currentStateFabricated: !!currentStateNote, currentStateNote: currentStateNote.trim(), instruction };
+  }
   console.log('[goal-advance] 自走発火:', g.project, '/ 資産注入:', knownAssets ? `${knownAssets.split('\n').length}件` : 'なし');
   agentTeamsManager.sendToJenny(instruction, companyId);
   return { fired: true, project: g.project, owner: g.owner };
