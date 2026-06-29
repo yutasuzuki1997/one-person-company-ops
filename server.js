@@ -18,6 +18,7 @@ const { listRepositories, getFileContent, updateFileContent, listFileTree, creat
 const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
 const { runQaGate } = require('./lib/qa-gate');
+const { verifyClaims } = require('./lib/claim-verifier');
 const { buildIndexFromReports, registerArtifacts, getProjectContext, resolveProject } = require('./lib/project-knowledge');
 const { detectExternalOp } = require('./lib/external-op');
 const { logActivity, getActivityLog } = require('./lib/activity-logger');
@@ -3929,6 +3930,24 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
       const task = tasks.find((t) => t.id === taskId);
       const sinceMs = task && task.createdAt ? Date.parse(task.createdAt) : 0;
       const qa = runQaGate(summary, { baseDir: DATA_DIR, sinceMs });
+      // P5: 主張検証(Claim Verifier)。完了報告内のコミット/PR参照をGitHub実在検証し、
+      //     捏造(404確定)があればQAをsuspect化して既存の差し戻し経路に乗せる。
+      //     誤検知最小: 検証不能(gh不在/到達不可/対象リポジトリ不明)は無罪。app-settingsで無効化可(claimVerify=false)。
+      try {
+        const cvSettings = readAppSettings();
+        if (cvSettings.claimVerify !== false) {
+          let cvGoals = [];
+          try { cvGoals = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goals.json'), 'utf-8')); } catch {}
+          const cvProject = resolveProject(agentId, task && task.name, cvGoals);
+          const cv = verifyClaims(summary, { settings: cvSettings, project: cvProject });
+          if (cv.verdict === 'fabricated') {
+            qa.verdict = 'suspect';
+            qa.reasons = [...(qa.reasons || []), ...cv.reasons];
+            qa.claims = cv.claims;
+            console.log('[claim-verifier] 捏造主張を検出:', taskId, cv.reasons.join(' / '));
+          }
+        }
+      } catch (e) { console.error('[claim-verifier] error:', e.message); }
       // カスケード防止: 差し戻し→再委託は毎回新taskIdを生むためtask単位ガードは効かない。
       // 会社単位の連続差し戻し回数(qaReworkStreak)で上限を設ける。QA合格でリセット。
       if (qa.verdict === 'suspect' && !(task && task.qaRetried) && qaReworkStreak < QA_REWORK_MAX) {
@@ -3936,7 +3955,7 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
         const qaMsg = `⚠️ QAゲート不合格(${agentName}): ${qa.reasons.join(' / ')}`;
         if (task) {
           task.status = 'error';
-          task.qa = { verdict: qa.verdict, reasons: qa.reasons, at: new Date().toISOString() };
+          task.qa = { verdict: qa.verdict, reasons: qa.reasons, claims: qa.claims, at: new Date().toISOString() };
           task.qaRetried = true;
           task.updatedAt = new Date().toISOString();
           saveTasksFile(tasks);
@@ -3946,7 +3965,11 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
         console.log(`[qa-gate] 差し戻し(${qaReworkStreak}/${QA_REWORK_MAX}):`, taskId, qa.reasons.join(' / '));
         // ジェニーに再作業を自動注入
         if (agentTeamsManager && agentTeamsManager.isJennyOnline && agentTeamsManager.isJennyOnline()) {
-          const reinstruct = `【QA差し戻し】先ほどの「${(task && task.name) || agentName}」の完了報告は品質ゲートを通過しませんでした。\n理由: ${qa.reasons.join(' / ')}\n担当エージェントに、実際の成果物ファイル(reports/ 等)を作成・保存し直すよう委託してください。完了報告には必ず ###ARTIFACT path="..."### で成果物パスを明示すること。`;
+          const fabricated = (qa.claims || []).some((c) => c.status === 'missing');
+          const claimNote = fabricated
+            ? `\n※ 報告に実在しないコミット/PRの主張が含まれていました。currentStateや報告には実際に存在する事実のみを書き、未実施のコミットハッシュ・PR番号を創作しないこと。`
+            : '';
+          const reinstruct = `【QA差し戻し】先ほどの「${(task && task.name) || agentName}」の完了報告は品質ゲートを通過しませんでした。\n理由: ${qa.reasons.join(' / ')}\n担当エージェントに、実際の成果物ファイル(reports/ 等)を作成・保存し直すよう委託してください。完了報告には必ず ###ARTIFACT path="..."### で成果物パスを明示すること。${claimNote}`;
           agentTeamsManager.sendToJenny(reinstruct, companyId);
         }
         return; // 通常の完了処理(report/workspace保存)はスキップ
@@ -4315,7 +4338,7 @@ async function runGoalDrivenAdvance(companyId, opts = {}) {
   const assetBlock = knownAssets
     ? `\n重要(調査の空回り防止): このプロジェクトには既に以下の成果物があります。着手前に必ず該当ファイルを Read で確認し、調査が済んでいるテーマは繰り返さず次フェーズ(実作業・素材作成・実装)へ進めること:\n${knownAssets}`
     : `\n重要(調査の空回り防止): まず reports/ 内の既存レポートを確認すること。該当テーマの調査が既に済んでいる場合は調査を繰り返さず、その成果を前提に次フェーズへ進めること。`;
-  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
+  const instruction = `【自走】プロジェクト「${g.project}」のゴール:「${g.goal}」\n現状:「${g.currentState || '不明'}」\nゴールに近づくために、次に着手すべき具体的な1タスクを担当エージェントにAgentツールで委託して進めてください。完了したら結果と次の一手を3行で報告してください。\n完了報告には必ず作成した成果物を ###ARTIFACT path="reports/..."### で明示すること(無いとQAゲートで差し戻されます)。${assetBlock}\n作業が一段落したら goals.json の当該プロジェクトの currentState を最新の状況に更新するよう依頼してください。\ncurrentStateと完了報告には実際に存在する事実のみを書くこと。未実施のコミットハッシュ・PR番号・URLを創作しない(実在検証で差し戻されます)。コミット/PRに言及する場合は実際に作成したものだけを正確に記載すること。\n注意: 外部影響のある操作(投稿/送信/課金/App Store提出/本番デプロイ/PRマージ)は実行せず、必ず ###APPROVAL kind="..." summary="..." options="承認|却下|修正指示"### ブロックで鈴木さんの承認を仰いでください。`;
   console.log('[goal-advance] 自走発火:', g.project, '/ 資産注入:', knownAssets ? `${knownAssets.split('\n').length}件` : 'なし');
   agentTeamsManager.sendToJenny(instruction, companyId);
   return { fired: true, project: g.project, owner: g.owner };
