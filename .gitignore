@@ -13,3 +13,5 @@ companies/
 tasks.json
 cost-ledger.json
 project-index.json
+approvals.json
+core/skills/auto-generated/

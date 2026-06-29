@@ -3001,6 +3001,20 @@ app.post('/api/qa/simulate', async (req, res) => {
   }
 });
 
+// 検証用: 承認キューを手動で積む(承認→再開フローの配管確認)
+// 例: POST /api/approval/simulate {"summary":"テスト投稿『こんにちは』をXに投稿"} → pendingId返却
+//     → POST /api/action/confirm {pendingId, approved:true} で再開注入
+app.post('/api/approval/simulate', (req, res) => {
+  try {
+    const { kind = 'post', summary = 'テスト承認(疑似)', options = ['承認', '却下'] } = req.body || {};
+    const companyId = req.body?.companyId || (reg.listMeta()[0] || {}).id || null;
+    const pendingId = enqueueApproval({ kind, summary, options, companyId, agentId: 'jenny' });
+    res.json({ ok: true, pendingId, queued: pendingActions.has(pendingId), mirrored: !!loadApprovalsFile()[pendingId] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── 確認待ち操作の承認・却下 ─────────────────────────────────────────────────
 
 app.post('/api/action/confirm', async (req, res) => {
@@ -3010,26 +3024,36 @@ app.post('/api/action/confirm', async (req, res) => {
   const pending = pendingActions.get(pendingId);
   if (!pending) return res.status(404).json({ error: 'pending action not found or already processed' });
 
-  pendingActions.delete(pendingId);
-  removeApprovalMirror(pendingId);
   const agent = pending.agentId ? reg.findAgentById(pending.agentId)?.agent : null;
 
   // APPROVAL: 秘書セッションに承認/却下を注入して再開させる
   if (pending.type === 'APPROVAL') {
     const cid = pending.companyId || null;
     const online = agentTeamsManager && agentTeamsManager.isJennyOnline();
+    // ジェニー停止中は再開できない。承認を消費せずキューに残す(サイレント消失を防ぐ)
+    if (!online) {
+      return res.status(409).json({ ok: false, error: 'jenny_offline', resumed: false,
+        message: 'ジェニーが起動していないため再開できません。起動後に再度承認してください(承認待ちは保持されています)。' });
+    }
+    // オンライン確認後に初めて消費
+    pendingActions.delete(pendingId);
+    removeApprovalMirror(pendingId);
     if (approved) {
-      if (online) agentTeamsManager.sendToJenny(`承認されました: ${pending.summary}。承認が必要だった操作を実行して、結果を報告してください。`, cid);
+      agentTeamsManager.sendToJenny(`承認されました: ${pending.summary}。承認が必要だった操作を実行して、結果を報告してください。`, cid);
       const payload = { type: 'action_completed', pendingId, agentId: pending.agentId, summary: pending.summary };
       if (cid) broadcastToCompany(cid, payload); else wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(payload)); });
-      return res.json({ ok: true, status: 'approved', resumed: !!online });
+      return res.json({ ok: true, status: 'approved', resumed: true });
     } else {
-      if (online) agentTeamsManager.sendToJenny(`却下されました: ${pending.summary}。この操作は実行せず、代替案を提示してください。`, cid);
+      agentTeamsManager.sendToJenny(`却下されました: ${pending.summary}。この操作は実行せず、代替案を提示してください。`, cid);
       const payload = { type: 'action_cancelled', pendingId, agentId: pending.agentId, summary: pending.summary };
       if (cid) broadcastToCompany(cid, payload); else wss.clients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify(payload)); });
-      return res.json({ ok: true, status: 'rejected', resumed: !!online });
+      return res.json({ ok: true, status: 'rejected', resumed: true });
     }
   }
+
+  // 非APPROVAL(PR_MERGE等)はサーバー側で実行するためここで消費
+  pendingActions.delete(pendingId);
+  removeApprovalMirror(pendingId);
 
   if (!approved) {
     // 却下
