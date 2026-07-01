@@ -945,7 +945,7 @@ app.get('/api/settings', (req, res) => {
     githubPersonalToken: s.githubPersonalToken ? '****' : '',
     githubCompanyToken: s.githubCompanyToken ? '****' : '',
     repositories: Array.isArray(s.repositories) ? s.repositories : [],
-    model: s.model || 'claude-sonnet-4-20250514',
+    model: s.model || 'claude-sonnet-4-6',
     providerMode: s.providerMode || 'anthropic_api',
     userName: s.userName || '',
     integrations: {
@@ -1366,7 +1366,7 @@ ${agent.jobDescription ? `職務内容: ${agent.jobDescription}` : ''}
   try {
     await streamAnthropic({
       apiKey,
-      model: s.model || 'claude-sonnet-4-20250514',
+      model: s.model || 'claude-sonnet-4-6',
       system: agentSystem,
       messages: apiMessages,
       onText: (chunk) => {
@@ -1739,7 +1739,7 @@ ${agentIdMap || agents.slice(0, 5).map(a => `- agentId="${a.id}"：${a.role}`).j
 
 以下のタスクを適切なエージェントに委託してください。
 必ず###DELEGATE###ブロックを1つだけ出力してください（複数のDELEGATEは不可）。`;
-        const bgResponse = await completeAnthropic({ apiKey, model: s.model || 'claude-sonnet-4-20250514', system: systemPrompt, messages: [{ role: 'user', content: `以下のタスクを適切なエージェントに委託してください：\n${text}` }] });
+        const bgResponse = await completeAnthropic({ apiKey, model: s.model || 'claude-sonnet-4-6', system: systemPrompt, messages: [{ role: 'user', content: `以下のタスクを適切なエージェントに委託してください：\n${text}` }] });
         const delegateReBg = /###DELEGATE\s+agentId="([^"]+)"\s+task="([^"]+)"(?:\s+progress="(\d+)")?(?:\s+estimatedMinutes="(\d+)")?(?:\s+weight="([^"]*)")?###/g;
         console.log('[secretary] heavy bg response:', bgResponse.slice(0, 200));
         let mBg;
@@ -1763,7 +1763,7 @@ ${agentIdMap || agents.slice(0, 5).map(a => `- agentId="${a.id}"：${a.role}`).j
               saveTasksFile(curTasks);
             }
           } catch {}
-          const executor = new AgentExecutor({ apiKey, model: s.model || 'claude-sonnet-4-20250514', companyId, agents, broadcast: (msg) => broadcastToCompany(companyId, msg), skillsDir: path.join(__dirname, 'core', 'skills'), saveTaskMessage, githubToken: getGithubToken('personal') || getGithubToken('company'), workspace: s.workspace });
+          const executor = new AgentExecutor({ apiKey, model: s.model || 'claude-sonnet-4-6', companyId, agents, broadcast: (msg) => broadcastToCompany(companyId, msg), skillsDir: path.join(__dirname, 'core', 'skills'), saveTaskMessage, githubToken: getGithubToken('personal') || getGithubToken('company'), workspace: s.workspace });
           const onProg = (pd) => { broadcastToCompany(companyId, { type: 'agent_progress', ...pd }); if (pd.message && pd.type === 'agent_message') { saveTaskMessage(newTaskId, { role: 'agent', content: pd.message, agentId, agentName: agent.displayName || agent.name, timestamp: new Date().toISOString() }); } };
           console.log(`[AgentExecutor] 起動(bg): ${agent.displayName || agent.name} taskId=${newTaskId}`);
           executor.execute(agent, task, newTaskId, 0, onProg, w).then(() => {
@@ -1833,11 +1833,11 @@ ${agentIdMap || agents.slice(0, 5).map(a => `- agentId="${a.id}"：${a.role}`).j
   let model = s.model;
   if (!model) {
     if (isMorningGreeting) {
-      model = 'claude-sonnet-4-20250514'; // ブリーフィングは要約力が要る
+      model = 'claude-sonnet-4-6'; // ブリーフィングは要約力が要る
     } else if (weight === 'instant' || weight === 'light') {
       model = 'claude-haiku-4-5-20251001';
     } else {
-      model = 'claude-sonnet-4-20250514';
+      model = 'claude-sonnet-4-6';
     }
   }
   console.log('[secretary] model selected:', model, '(weight:', weight, ')');
@@ -1960,7 +1960,7 @@ ${agentIdMap || agents.slice(0, 5).map(a => `- agentId="${a.id}"：${a.role}`).j
       // AgentExecutorでバックグラウンド実行
       const s = readAppSettings();
       const execApiKey = s.anthropicApiKey || '';
-      const execModel = s.model || 'claude-sonnet-4-20250514';
+      const execModel = s.model || 'claude-sonnet-4-6';
       if (execApiKey.trim()) {
         const executor = new AgentExecutor({
           apiKey: execApiKey,
@@ -3934,13 +3934,14 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
       // P5: 主張検証(Claim Verifier)。完了報告内のコミット/PR参照をGitHub実在検証し、
       //     捏造(404確定)があればQAをsuspect化して既存の差し戻し経路に乗せる。
       //     誤検知最小: 検証不能(gh不在/到達不可/対象リポジトリ不明)は無罪。app-settingsで無効化可(claimVerify=false)。
+      let cv = null;
       try {
         const cvSettings = readAppSettings();
         if (cvSettings.claimVerify !== false) {
           let cvGoals = [];
           try { cvGoals = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goals.json'), 'utf-8')); } catch {}
           const cvProject = resolveProject(agentId, task && task.name, cvGoals);
-          const cv = verifyClaims(summary, { settings: cvSettings, project: cvProject });
+          cv = verifyClaims(summary, { settings: cvSettings, project: cvProject });
           if (cv.verdict === 'fabricated') {
             qa.verdict = 'suspect';
             qa.reasons = [...(qa.reasons || []), ...cv.reasons];
@@ -3998,12 +3999,12 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
         const project = resolveProject(agentId, task && task.name, goals);
         if (project) registerArtifacts(DATA_DIR, project, qa.artifacts, { agent: agentId, at: new Date().toISOString() });
       } catch (e) { console.error('[project-knowledge] register error:', e.message); }
-      // P4: QA LLMエスカレーション(任意・既定off)。app-settings.json の qaLlmEscalation=true で有効。
-      //     有効時のみ成果物の中身をHaikuで品質レビュー(非ブロッキング)。
+      // P4: QA LLMエスカレーション(既定ON)。app-settings.json で qaLlmEscalation=false にすると無効化。
+      //     成果物の中身をHaikuで品質レビュー(非ブロッキング)。claimVerify と同じく「明示false以外はON」。
       try {
         const sset = readAppSettings();
         const localArt = (qa.artifacts || []).find((a) => a.exists && /\.md$/.test(a.path || ''));
-        if (sset.qaLlmEscalation && sset.anthropicApiKey && localArt) {
+        if (sset.qaLlmEscalation !== false && sset.anthropicApiKey && localArt) {
           (async () => {
             try {
               let body = '';
@@ -4220,7 +4221,7 @@ async function runAutonomousMessage(companyId, text) {
   // ルーティン・自律発火はショート指示がほとんど → Haiku デフォルト
   // 朝ブリーフィング（"おはよう"）だけ Sonnet に上げる
   const isMorning = /^(おはよう|おはようございます|good morning)/i.test(String(text).trim());
-  const model = s.model || (isMorning ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5-20251001');
+  const model = s.model || (isMorning ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001');
   console.log('[autonomous] model selected:', model);
   const system = await buildSecretarySystemPromptWithMemory(companyId);
   const recentHistory = history.slice(-5);
@@ -4482,7 +4483,7 @@ async function runAutonomousCheck(companyId) {
     (a.role || '').includes('部長') || (a.displayName || '').includes('事業部長')
   );
   if (divisionHeads.length > 0) {
-    const model = s.model || 'claude-sonnet-4-20250514';
+    const model = s.model || 'claude-sonnet-4-6';
     for (const head of divisionHeads) {
       try {
         console.log(`[autonomous] 事業部長チェック依頼: ${head.displayName || head.name}`);
@@ -4528,7 +4529,7 @@ async function runAutonomousCheck(companyId) {
         if (agent) {
           console.log(`[autonomous] 停滞タスク再開: ${staleTask.name} → ${agent.displayName || agent.name}`);
           const executor = new AgentExecutor({
-            apiKey, model: s.model || 'claude-sonnet-4-20250514', companyId, agents,
+            apiKey, model: s.model || 'claude-sonnet-4-6', companyId, agents,
             broadcast: (msg) => broadcastToCompany(companyId, msg),
             skillsDir: path.join(__dirname, 'core', 'skills'),
             saveTaskMessage,
