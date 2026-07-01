@@ -12,6 +12,7 @@ companies/
 /skills/
 tasks.json
 cost-ledger.json
+qa-metrics.jsonl
 project-index.json
 approvals.json
 core/skills/auto-generated/

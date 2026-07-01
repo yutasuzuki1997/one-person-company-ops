@@ -19,6 +19,7 @@ const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require(
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
 const { runQaGate } = require('./lib/qa-gate');
 const { verifyClaims } = require('./lib/claim-verifier');
+const { recordQaMetric, summarizeClaims, summarizeQaMetrics } = require('./lib/qa-metrics');
 const { buildIndexFromReports, registerArtifacts, getProjectContext, resolveProject } = require('./lib/project-knowledge');
 const { detectExternalOp } = require('./lib/external-op');
 const { logActivity, getActivityLog } = require('./lib/activity-logger');
@@ -3019,6 +3020,16 @@ app.post('/api/qa/simulate', async (req, res) => {
   }
 });
 
+// QAメトリクス集計の読み出し(qa-metrics.jsonl → verdict件数/LLMフラグ率/claim分布/裸#Nスキップ累計)
+// 記録は書き込み専用の副作用ログなので、ここが唯一の可視化口。
+app.get('/api/qa/metrics', (req, res) => {
+  try {
+    res.json({ ok: true, summary: summarizeQaMetrics(DATA_DIR) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // 検証用: 承認キューを手動で積む(承認→再開フローの配管確認)
 // 例: POST /api/approval/simulate {"summary":"テスト投稿『こんにちは』をXに投稿"} → pendingId返却
 //     → POST /api/action/confirm {pendingId, approved:true} で再開注入
@@ -3950,6 +3961,11 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
           }
         }
       } catch (e) { console.error('[claim-verifier] error:', e.message); }
+      // QAメトリクス(verdict記録): 誤検知/見逃しを後で集計するため、判定が確定した時点で1件追記する。
+      const recordVerdict = (verdict, reworkCount) => recordQaMetric(DATA_DIR, {
+        kind: 'verdict', taskId, agentId, agentName, verdict,
+        claim: summarizeClaims(cv && cv.claims), reworkCount,
+      });
       // カスケード防止: 差し戻し→再委託は毎回新taskIdを生むためtask単位ガードは効かない。
       // 会社単位の連続差し戻し回数(qaReworkStreak)で上限を設ける。QA合格でリセット。
       if (qa.verdict === 'suspect' && !(task && task.qaRetried) && qaReworkStreak < QA_REWORK_MAX) {
@@ -3974,6 +3990,7 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
           const reinstruct = `【QA差し戻し】先ほどの「${(task && task.name) || agentName}」の完了報告は品質ゲートを通過しませんでした。\n理由: ${qa.reasons.join(' / ')}\n作り直しは必ず元の実装担当「${agentName}」(subagent_type: ${agentId})に再委託すること。レビュー/QA担当(agent-sp-qa)に成果物の作成を振らないこと(役割不一致)。\n担当に、実際の成果物ファイル(reports/ 等)を作成・保存し直すよう委託してください。完了報告には必ず ###ARTIFACT path="..."### で成果物パスを明示すること。${claimNote}`;
           agentTeamsManager.sendToJenny(reinstruct, companyId);
         }
+        recordVerdict('suspect', qaReworkStreak);
         return; // 通常の完了処理(report/workspace保存)はスキップ
       }
       if (qa.verdict === 'suspect') {
@@ -3984,10 +4001,12 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
         saveTaskMessage(taskId, { role: 'system', content: stopMsg, timestamp: new Date().toISOString() });
         broadcastToCompany(companyId, { type: 'qa_failed', agentId, agentName, taskId, reasons: qa.reasons, message: stopMsg, halted: true });
         console.log('[qa-gate] 差し戻し上限到達 - 自動停止:', taskId);
+        recordVerdict('suspect', qaReworkStreak);
         return;
       }
       // pass: 連続差し戻しをリセットし、QA結果を記録して通常処理へ
       qaReworkStreak = 0;
+      recordVerdict('pass', 0);
       if (task) {
         task.qa = { verdict: qa.verdict, reasons: qa.reasons, at: new Date().toISOString() };
         saveTasksFile(tasks);
@@ -4018,7 +4037,9 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
               const msg = `🔎 QA二次レビュー(${localArt.path}): ${review.trim()}`;
               saveTaskMessage(taskId, { role: 'system', content: msg, timestamp: new Date().toISOString() });
               broadcastToCompany(companyId, { type: 'qa_review', taskId, artifact: localArt.path, review: review.trim() });
-              console.log('[qa-gate] LLM二次レビュー:', localArt.path, review.trim().slice(0, 60));
+              const flagged = !/品質OK/.test(review);
+              recordQaMetric(DATA_DIR, { kind: 'llm_review', taskId, agentId, artifact: localArt.path, flagged, review: review.trim().slice(0, 200) });
+              console.log('[qa-gate] LLM二次レビュー:', localArt.path, flagged ? '指摘あり' : '品質OK', review.trim().slice(0, 60));
             } catch (e) { console.error('[qa-gate] LLMレビューerror:', e.message); }
           })();
         }
