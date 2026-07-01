@@ -586,8 +586,74 @@ function CostBadge({ agents = [] }) {
   );
 }
 
+// アクティブエージェント・サマリー（作業中 N件／⚠️スタック M件）
+// 「今どのエージェントが何をしているか」と、長時間無応答のスタックをヘッダーに常時集約表示する。
+// クリックで作業中エージェントとスタックタスクの一覧をポップオーバー表示。
+function ActiveAgentsSummary({ agents = [], stuckTasks = {} }) {
+  const [open, setOpen] = useState(false);
+  const working = agents.filter((a) => a.status === 'working' || a.status === 'preparing');
+  const stuck = Object.entries(stuckTasks).map(([taskId, v]) => ({ taskId, ...v }));
+  const stuckCount = stuck.length;
+  const hasStuck = stuckCount > 0;
+  const nameOf = (a) => a.displayName || a.name || a.id;
+
+  return (
+    <span style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={`作業中 ${working.length}件${hasStuck ? ` ／ スタック ${stuckCount}件` : ''}（クリックで一覧）`}
+        style={{
+          fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+          color: hasStuck ? '#fca5a5' : '#86efac',
+          background: hasStuck ? 'rgba(248,113,113,0.12)' : 'rgba(34,197,94,0.1)',
+          border: `1px solid ${hasStuck ? 'rgba(248,113,113,0.4)' : 'rgba(34,197,94,0.3)'}`,
+          fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', cursor: 'pointer',
+        }}
+      >
+        ⚙ 作業中 {working.length}{hasStuck ? ` ・ ⚠${stuckCount}` : ''} ▾
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 50,
+            minWidth: 260, maxHeight: 320, overflowY: 'auto',
+            padding: '8px 10px', borderRadius: 10,
+            background: 'rgba(6,13,26,0.97)', border: '1px solid rgba(34,197,94,0.3)',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', marginBottom: 6 }}>作業中のエージェント</div>
+          {working.length === 0 ? (
+            <div style={{ fontSize: 11, color: '#64748b', padding: '4px 0' }}>現在作業中のエージェントはいません</div>
+          ) : (
+            working.map((a) => (
+              <div key={a.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', fontSize: 11 }}>
+                <span style={{ color: '#22c55e', fontSize: 8 }}>●</span>
+                <span style={{ flex: 1, color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameOf(a)}</span>
+                <span style={{ color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 120 }}>{a.currentTask || '準備中'}</span>
+              </div>
+            ))
+          )}
+          {hasStuck && (
+            <div style={{ borderTop: '1px solid rgba(51,65,85,0.4)', marginTop: 6, paddingTop: 6 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#fca5a5', marginBottom: 4 }}>⚠️ 長時間無応答（{stuckCount}）</div>
+              {stuck.map((s) => (
+                <div key={s.taskId} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', fontSize: 11 }}>
+                  <span style={{ flex: 1, color: '#fecaca', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.taskName || s.taskId}</span>
+                  <span style={{ color: '#f87171', whiteSpace: 'nowrap' }}>{s.agentName || '担当不明'} ・ {s.idleMin}分</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
 // ジェニーチャットビュー（タスクとは別の会話画面）
-function JennyChatView({ messages, streamContent, onSendMessage, isSending, agents = [] }) {
+function JennyChatView({ messages, streamContent, onSendMessage, isSending, agents = [], stuckTasks = {} }) {
   const bottomRef = useRef(null);
   const [inputText, setInputText] = useState('');
 
@@ -614,6 +680,7 @@ function JennyChatView({ messages, streamContent, onSendMessage, isSending, agen
           </div>
           <span style={{ color: '#22c55e', fontSize: 8, marginLeft: 4 }}>●</span>
           <span style={{ flex: 1 }} />
+          <ActiveAgentsSummary agents={agents} stuckTasks={stuckTasks} />
           <CostBadge agents={agents} />
         </div>
       </div>
@@ -832,6 +899,8 @@ export default function Dashboard({ onNavigate }) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   // stream_start/stream_end で管理するアクティブエージェントSet
   const [activeAgents, setActiveAgents] = useState(new Set());
+  // スタック検知: バックエンドの agent_stuck を taskId 単位で保持（回復/完了で解除）
+  const [stuckTasks, setStuckTasks] = useState({});
 
   // タスク一覧をAPIから復元（起動時）
   useEffect(() => {
@@ -941,12 +1010,29 @@ export default function Dashboard({ onNavigate }) {
             t.id === msg.taskId && t.status !== 'review' ? { ...t, status: 'active' } : t
           ));
         }
+        // 活動を観測したらスタック解除
+        if (msg.taskId) setStuckTasks((prev) => { if (!prev[msg.taskId]) return prev; const n = { ...prev }; delete n[msg.taskId]; return n; });
       } else if (msg.type === 'jd_proposal') {
         setAgents((prev) => prev.map((a) =>
           a.id === msg.agentId ? { ...a, pendingJdUpdate: msg.proposedJd } : a
         ));
       } else if (msg.type === 'agents_reloaded') {
         loadAgents(companyId);
+      } else if (msg.type === 'agent_spawn') {
+        // ネイティブAgent委託の開始。担当エージェントを作業中にして可視化する
+        // (バックエンドは登録statusを更新しないため、ここでUI状態に反映)
+        if (msg.agentId && msg.agentId !== 'unknown') {
+          setAgents((prev) => prev.map((a) => a.id === msg.agentId
+            ? { ...a, status: 'working', currentTask: msg.description || a.currentTask, lastActiveAt: new Date().toISOString() }
+            : a));
+          setActiveAgents((prev) => { const n = new Set(prev); n.add(msg.agentId); return n; });
+        }
+      } else if (msg.type === 'agent_stuck') {
+        // 委託したまま長時間更新が無いタスク。サマリーに警告表示
+        setStuckTasks((prev) => ({
+          ...prev,
+          [msg.taskId]: { taskName: msg.taskName, agentName: msg.agentName, idleMin: msg.idleMin, at: Date.now() },
+        }));
       } else if (msg.type === 'stream_start') {
         if (msg.agentId) {
           setActiveAgents((prev) => { const n = new Set(prev); n.add(msg.agentId); return n; });
@@ -1011,6 +1097,13 @@ export default function Dashboard({ onNavigate }) {
               return { ...task, messages: [...(task.messages || []), newMsg], status: 'review' };
             });
           });
+          // 担当エージェントを作業中から戻す(レビュー待ち)＋アクティブ集合から除外
+          if (msg.agentId && msg.agentId !== 'unknown') {
+            setAgents((prev) => prev.map((a) => a.id === msg.agentId ? { ...a, status: 'review', lastActiveAt: new Date().toISOString() } : a));
+            setActiveAgents((prev) => { if (!prev.has(msg.agentId)) return prev; const n = new Set(prev); n.delete(msg.agentId); return n; });
+          }
+          // 完了したらスタック解除
+          if (msg.taskId) setStuckTasks((prev) => { if (!prev[msg.taskId]) return prev; const n = { ...prev }; delete n[msg.taskId]; return n; });
           // 通知バナー
           setCompletionBanner({
             message: `✅ ${msg.agentName || 'エージェント'}が完了しました`,
@@ -1462,6 +1555,7 @@ export default function Dashboard({ onNavigate }) {
             onSendMessage={handleJennySendMessage}
             isSending={isSending}
             agents={agents}
+            stuckTasks={stuckTasks}
           />
         ) : (
           <TaskTerminal

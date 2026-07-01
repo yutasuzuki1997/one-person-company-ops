@@ -4717,6 +4717,44 @@ setInterval(() => {
   runAutonomousTask().catch((err) => console.error('[autonomous] interval error:', err.message));
 }, AUTONOMOUS_INTERVAL_MS);
 console.log(`[autonomous] Hourly task timer registered (interval: ${AUTONOMOUS_INTERVAL_MS / 60000}min)`);
+
+// ── スタック検知: 委託したまま長時間 updatedAt が進まないタスクを検知しUIへ通知 ──
+// UI側の30分警告(描画時のみ)と違い、バックエンドで常時走査して agent_stuck を broadcast する。
+const STUCK_NOTIFIED = new Set(); // 多重通知防止。回復/終了で解除し再スタック時は再通知
+const STUCK_SCAN_INTERVAL_MS = 60 * 1000;
+const STUCK_ACTIVE_STATUSES = new Set(['working', 'active', 'running']); // 委託実行中。waiting(承認待ち)/review は意図的停止なので除外
+function scanStuckTasks() {
+  try {
+    const company = reg.listMeta()[0] || {};
+    if (!company.id) return;
+    const s = readAppSettings();
+    const thresholdMin = Number(s.stuckThresholdMin) > 0 ? Number(s.stuckThresholdMin) : 15;
+    const thresholdMs = thresholdMin * 60 * 1000;
+    const now = Date.now();
+    const tasks = loadTasksFile();
+    const activeIds = new Set();
+    for (const t of tasks) {
+      if (!t || !STUCK_ACTIVE_STATUSES.has(t.status)) continue;
+      activeIds.add(t.id);
+      const last = Date.parse(t.updatedAt || t.startedAt || t.createdAt || '') || 0;
+      if (!last) continue;
+      const idleMs = now - last;
+      if (idleMs < thresholdMs) { STUCK_NOTIFIED.delete(t.id); continue; } // 回復
+      if (STUCK_NOTIFIED.has(t.id)) continue; // 通知済み
+      STUCK_NOTIFIED.add(t.id);
+      broadcastToCompany(company.id, {
+        type: 'agent_stuck', taskId: t.id, taskName: t.name,
+        agentId: t.assignedAgentId || null, agentName: t.assignedAgentName || null,
+        idleMs, idleMin: Math.round(idleMs / 60000), thresholdMin,
+      });
+      console.log(`[stuck] 長時間無応答を検知: ${t.name || t.id} (${Math.round(idleMs / 60000)}分)`);
+    }
+    for (const id of [...STUCK_NOTIFIED]) if (!activeIds.has(id)) STUCK_NOTIFIED.delete(id); // 終了タスクを掃除
+  } catch (e) { console.error('[stuck] scan error:', e.message); }
+}
+setInterval(scanStuckTasks, STUCK_SCAN_INTERVAL_MS);
+console.log(`[stuck] Stuck-task detector registered (interval: ${STUCK_SCAN_INTERVAL_MS / 1000}s)`);
+
 scheduleDaily();
 // ─────────────────────────────────────────────────────────────────────────────
 
