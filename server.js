@@ -17,7 +17,7 @@ const { completeAnthropic, streamAnthropic } = require('./lib/anthropic-stream')
 const { listRepositories, getFileContent, updateFileContent, listFileTree, createPullRequest, mergePullRequest, listPullRequests, getPullRequest } = require('./lib/github-connector');
 const { cloneWorkspace, syncAgentsToWorkspace, readWorkspaceContext } = require('./lib/workspace-manager');
 const { getWorkspacePath, initWorkspace, saveToWorkspace, loadFromWorkspace, syncSkillsFromWorkspace } = require('./lib/workspace-sync');
-const { runQaGate } = require('./lib/qa-gate');
+const { runQaGateAsync } = require('./lib/qa-gate');
 const { verifyClaims } = require('./lib/claim-verifier');
 const { recordQaMetric, summarizeClaims, summarizeQaMetrics } = require('./lib/qa-metrics');
 const { buildIndexFromReports, registerArtifacts, getProjectContext, resolveProject } = require('./lib/project-knowledge');
@@ -3008,7 +3008,7 @@ app.post('/api/qa/simulate', async (req, res) => {
     const taskId = 'qa-test-' + Date.now();
     tasks.push({ id: taskId, name: taskName, status: 'active', messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     saveTasksFile(tasks);
-    const qa = runQaGate(summary, { baseDir: DATA_DIR, sinceMs: 0 });
+    const qa = await runQaGateAsync(summary, { baseDir: DATA_DIR, sinceMs: 0, verifyUrls: readAppSettings().verifyUrls !== false });
     await handleAgentCompletion(companyId, agentId, agentName, summary, taskId, success, { fromNative: true });
     const after = loadTasksFile().find((t) => t.id === taskId);
     const result = { taskStatus: after && after.status, qaField: after && after.qa };
@@ -3941,7 +3941,12 @@ async function handleAgentCompletion(companyId, agentId, agentName, summary, tas
       const tasks = loadTasksFile();
       const task = tasks.find((t) => t.id === taskId);
       const sinceMs = task && task.createdAt ? Date.parse(task.createdAt) : 0;
-      const qa = runQaGate(summary, { baseDir: DATA_DIR, sinceMs });
+      // 外部URLが唯一の成果物根拠の場合はURL先を実fetch検証(404/破損なら格下げ)。verifyUrls=falseで無効化。
+      const qaSettings = readAppSettings();
+      const qa = await runQaGateAsync(summary, { baseDir: DATA_DIR, sinceMs, verifyUrls: qaSettings.verifyUrls !== false });
+      if (qa.verdict === 'suspect' && qa.urlChecks) {
+        console.log('[qa-gate] 外部URL検証で格下げ:', taskId, (qa.reasons || []).join(' / '));
+      }
       // P5: 主張検証(Claim Verifier)。完了報告内のコミット/PR参照をGitHub実在検証し、
       //     捏造(404確定)があればQAをsuspect化して既存の差し戻し経路に乗せる。
       //     誤検知最小: 検証不能(gh不在/到達不可/対象リポジトリ不明)は無罪。app-settingsで無効化可(claimVerify=false)。
